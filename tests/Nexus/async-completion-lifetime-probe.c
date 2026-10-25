@@ -4,6 +4,7 @@
 #define INITGUID
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 #include "xtaskqueue.h"
 #include "xasyncprovider.h"
 
@@ -48,6 +49,9 @@ int main(int argc, char **argv)
     HMODULE dll = LoadLibraryA(argc > 1 ? argv[1] : "xgameruntime.dll");
     int i;
     if (!dll) { printf("DLL load failed %lu\n", GetLastError()); return 1; }
+    /* Wine can swap a requested path for its installed builtin, whose DOS stub
+     * carries this marker; refuse it so a path never validates the wrong DLL. */
+    if (argc > 1) CHECK(memcmp((const char *)dll + 0x40, "Wine builtin DLL", 16));
     query = (void *)GetProcAddress(dll, "QueryApiImpl");
     CHECK(query != NULL);
     if (!query) return 1;

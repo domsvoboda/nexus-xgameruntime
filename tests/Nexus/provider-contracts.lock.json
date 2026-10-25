@@ -2,6 +2,6 @@
   "schema": 1,
   "originalProbes": {
     "game-relaunch-probe.c": "7cf8ef0222e02499fd775a5c60cd5ea3cd1a713a74f0dd375fce142c05084de3",
-    "async-provider-contract-probe.c": "a425fe0b766cc176c6287d552023544170c5c221e0646c594f994e9ba4b3f538"
+    "async-provider-contract-probe.c": "6493b19bf85b39df9bf02ddd521fc37bb1dbd1132a90bb52d1f9e5a1dec2400c"
   }
 }

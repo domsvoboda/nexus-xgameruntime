@@ -3,6 +3,7 @@
 #define INITGUID
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 #include "xtaskqueue.h"
 #include "xasyncprovider.h"
 #include "xnetworking.h"
@@ -103,6 +104,9 @@ int main(int argc, char **argv)
     const HRESULT failures_to_test[] = { E_FAIL, E_NOTIMPL, E_ABORT };
     UINT i;
     if (!dll) { printf("FAIL load %lu\n", GetLastError()); return 1; }
+    /* Wine can swap a requested path for its installed builtin, whose DOS stub
+     * carries this marker; refuse it so a path never validates the wrong DLL. */
+    if (argc > 1) CHECK("requested-dll-not-wine-builtin", memcmp((const char *)dll + 0x40, "Wine builtin DLL", 16));
     query = (void *)GetProcAddress(dll, "QueryApiImpl");
     if (!query || FAILED(query(&CLSID_XThreadingImpl, &IID_IXThreadingImpl, (void **)&threads))) return 1;
     CHECK("queue", IXThreadingImpl_XTaskQueueCreate(threads, XTaskQueueDispatchMode_Manual, XTaskQueueDispatchMode_Manual, &queue) == S_OK);
