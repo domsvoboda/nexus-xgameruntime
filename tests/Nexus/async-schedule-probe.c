@@ -44,9 +44,10 @@ int main(int argc, char **argv)
 {
     AddVectoredExceptionHandler(1, exception);
     HMODULE dll = LoadLibraryA(argc > 1 ? argv[1] : "xgameruntime.dll");
+    if (!dll) { printf("FAIL load %lu\n", GetLastError()); return 1; }
     /* Wine can swap a requested path for its installed builtin, whose DOS stub
      * carries this marker; refuse it so a path never validates the wrong DLL. */
-    if (argc > 1) CHECK("requested-dll-not-wine-builtin", dll && memcmp((const char *)dll + 0x40, "Wine builtin DLL", 16));
+    if (argc > 1) CHECK("requested-dll-not-wine-builtin", memcmp((const char *)dll + 0x40, "Wine builtin DLL", 16));
     HRESULT (WINAPI *query)(const GUID *, const GUID *, void **) = dll ? (void *)GetProcAddress(dll, "QueryApiImpl") : NULL;
     CHECK("threading", query && query(&CLSID_XThreadingImpl, &IID_IXThreadingImpl, (void **)&threads) == S_OK);
     if (!threads) return 1;
