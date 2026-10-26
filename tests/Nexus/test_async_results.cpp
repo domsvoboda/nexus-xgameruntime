@@ -117,3 +117,45 @@ TEST( NexusAsyncResults, ConcurrentResultReadersCannotConsumeTheSamePayloadTwice
     EXPECT_EQ( payload.cleanups, 1u );
     EXPECT_EQ( values[0] + values[1], 0x1234u );
 }
+namespace
+{
+struct Completion
+{
+    Payload payload;
+    HRESULT result = E_PENDING;
+    DWORD value = 0;
+    unsigned cleanupsAfterRead = ~0u, cleanupsAtReturn = ~0u;
+};
+void WINAPI ReadResultInCompletion( XAsyncBlock *block )
+{
+    auto completion = static_cast<Completion *>( block->context );
+    completion->result = completion->payload.api->XAsyncGetResult( block, &payloadIdentity, sizeof( DWORD ),
+                                                                   &completion->value, nullptr );
+    completion->cleanupsAfterRead = completion->payload.cleanups;
+    Sleep( 20 );
+    completion->cleanupsAtReturn = completion->payload.cleanups;
+}
+}
+TEST( NexusAsyncResults, ResultReadInCompletionKeepsProviderDataUntilTheCallbackReturns )
+{
+    // Native XAsync runs provider Cleanup only after the completion callback
+    // returns. Titles may read data the provider owns after closing the result
+    // inside the callback; 007 First Light crashed when Cleanup ran early.
+    Fixture fixture;
+    ASSERT_EQ( fixture.Initialize(), S_OK );
+    Completion completion{ { fixture.api } };
+    XAsyncBlock async{};
+    async.queue = fixture.queue;
+    async.context = &completion;
+    async.callback = ReadResultInCompletion;
+    ASSERT_EQ( fixture.api->XAsyncBegin( &async, &completion.payload, &payloadIdentity, "Payload", PayloadProvider ),
+               S_OK );
+    ASSERT_TRUE( fixture.api->XTaskQueueDispatch( fixture.queue, XTaskQueuePort::Work, 5000 ) );
+    ASSERT_TRUE( fixture.api->XTaskQueueDispatch( fixture.queue, XTaskQueuePort::Completion, 5000 ) );
+    EXPECT_EQ( completion.result, S_OK );
+    EXPECT_EQ( completion.value, 0x1234u );
+    EXPECT_EQ( completion.cleanupsAfterRead, 0u );
+    EXPECT_EQ( completion.cleanupsAtReturn, 0u );
+    EXPECT_EQ( completion.payload.reads, 1u );
+    EXPECT_EQ( completion.payload.cleanups, 1u );
+}
