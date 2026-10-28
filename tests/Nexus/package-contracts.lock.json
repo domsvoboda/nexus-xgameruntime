@@ -3,7 +3,7 @@
   "originalProbes": {
     "package-identity-probe.c": "d783a2090ff878c44abfa9d6b9c29dc34f69c48d23ad7ed8d35cf917382357a3",
     "package-legacy-probe.c": "75f043abddf893b5925da491fa9b2474550844b8298f2fc74c6ee94290aa12db",
-    "package-chunks-probe.c": "3d2fc0a9697f95891eb022c92dc179fe8506e12bf71097028c518ec1e8da2ba0",
+    "package-chunks-probe.c": "8bcc0d52eae4a3cacf7c3aab6cdbaed2dc70ec3f5d9528eed10f51cad2fa45be",
     "package-monitors-probe.c": "892f87c5cf686e079bb1890b2f03d8e203e2d0f402631e27e8c5e23a4231ae6f",
     "package-progress-bytes-probe.c": "b61e784decd05e8f83f6107e9c444f074af68b90ce33af2940f77f9f1efa223e"
   }

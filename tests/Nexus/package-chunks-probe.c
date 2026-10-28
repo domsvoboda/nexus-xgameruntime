@@ -102,6 +102,16 @@ static void tests( void )
     unsigned i;
     layout(valid_layout);
     {
+        XPackageChunkSelector selector = {0};
+        XPackageChunkAvailability availability = XPackageChunkAvailability_Ready;
+        selector.type = XPackageChunkSelectorType_Chunk; selector.chunkId = 2;
+        CHECK("unknown-chunk-query", IXPackageImpl4_XPackageFindChunkAvailability(package, identifier, 1, &selector, &availability) == S_OK);
+        CHECK("unknown-chunk-unavailable", availability == XPackageChunkAvailability_Unavailable);
+        selector.chunkId = 7; availability = XPackageChunkAvailability_Unavailable;
+        CHECK("known-chunk-query", IXPackageImpl4_XPackageFindChunkAvailability(package, identifier, 1, &selector, &availability) == S_OK);
+        CHECK("known-chunk-ready", availability == XPackageChunkAvailability_Ready);
+    }
+    {
         WCHAR directory[MAX_PATH];
         const char *names[] = {"Nexus.Chunks", "Nexus.Unrelated"};
         char xml[1024];
@@ -144,6 +154,13 @@ static void tests( void )
     reenter = TRUE; enumerate(XPackageChunkSelectorType_Chunk, S_OK, 4);
     swprintf(path, MAX_PATH, L"%ls\\data\\optional.bin", root);
     CHECK("remove-optional-fixture", DeleteFileW(path));
+    {
+        XPackageChunkSelector selector = {0};
+        XPackageChunkAvailability availability = XPackageChunkAvailability_Ready;
+        selector.type = XPackageChunkSelectorType_Chunk; selector.chunkId = 9;
+        CHECK("missing-chunk-query", IXPackageImpl4_XPackageFindChunkAvailability(package, identifier, 1, &selector, &availability) == S_OK);
+        CHECK("missing-chunk-unavailable", availability == XPackageChunkAvailability_Unavailable);
+    }
     enumerate(XPackageChunkSelectorType_Chunk, S_OK, 4);
     CHECK("missing-not-ready", states[2] == XPackageChunkAvailability_Unavailable && states[0] == XPackageChunkAvailability_Ready);
     enumerate(XPackageChunkSelectorType_Tag, S_OK, 3);

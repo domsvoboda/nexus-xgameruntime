@@ -189,20 +189,32 @@ HRESULT WINAPI XPackageImpl::XPackageGetUserLocale( SIZE_T localeSize, char *loc
     return S_OK;
 }
 
-/* Everything a title can ask about is already on disk.
- *
- * Chunks are how a package is installed in pieces, so a title can start before
- * the rest arrives and wait on what it still needs. Xodus extracts a package in
- * full before it can be launched, so every chunk is Ready and always was.
- * Refusing to say so leaves a title waiting for content that is already there:
- * Resident Evil 2 plays its publisher logos and then sits on a black screen. */
+/* Numeric chunk selectors must identify a chunk declared by the package. */
 HRESULT WINAPI XPackageImpl::XPackageFindChunkAvailability( const char *packageIdentifier, UINT32 selectorCount,
                                                             XPackageChunkSelector *selectors,
                                                             XPackageChunkAvailability *availability )
 {
-
-    if ( !availability ) return E_INVALIDARG;
-    *availability = XPackageChunkAvailability::Ready;
+    struct chunk_snapshot *snapshot;
+    HRESULT hr;
+    UINT i;
+    if ( !availability || ( selectorCount && !selectors ) ) return E_INVALIDARG;
+    /* Preserve the legacy treatment of non-numeric and combined selectors. */
+    if ( selectorCount != 1 || selectors[0].type != XPackageChunkSelectorType::Chunk )
+    {
+        *availability = XPackageChunkAvailability::Ready;
+        return S_OK;
+    }
+    if ( FAILED( hr = chunks_load( packageIdentifier, FALSE, &snapshot, selectorCount, selectors ) ) ) return hr;
+    *availability = XPackageChunkAvailability::Unavailable;
+    for ( i = 0; i < snapshot->count; i++ )
+    {
+        if ( snapshot->chunks[i].id == selectors[0].chunkId )
+        {
+            *availability = std::max( snapshot->registration, snapshot->chunks[i].availability );
+            break;
+        }
+    }
+    chunks_free( snapshot );
     return S_OK;
 }
 
