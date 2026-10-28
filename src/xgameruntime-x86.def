@@ -9,3 +9,5 @@ EXPORTS
     XErrorReport=XErrorReport@8
 
 XodusSaveFilesMonitor=XodusSaveFilesMonitor@16
+DllGetActivationFactory=DllGetActivationFactory@8
+DllCanUnloadNow=DllCanUnloadNow@0

@@ -9,3 +9,5 @@ EXPORTS
     UninitializeApiImpl
     XErrorReport
 XodusSaveFilesMonitor
+DllGetActivationFactory
+DllCanUnloadNow
