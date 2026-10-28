@@ -2,6 +2,7 @@
 #include "Presence.h"
 #include "../GameInvite/Bridge.h"
 #include "../../Runtime/Configuration.h"
+#include "../Threading/Atomic64.h"
 #include <memory>
 #include <new>
 
@@ -9,7 +10,7 @@ namespace nexus::presence
 {
 namespace
 {
-std::atomic<UINT64> generation{ 0 };
+Atomic64<UINT64> generation{ 0 };
 struct Worker
 {
     XUserHandle user;
