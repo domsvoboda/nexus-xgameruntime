@@ -171,6 +171,15 @@ foreach(probe store-entitlements package-content)
 endforeach()
 target_link_libraries(nexus_package-content PRIVATE xgameruntime-impl)
 
+add_executable(nexus_package-installed Nexus/package-installed.cpp)
+add_dependencies(nexus_package-installed xgameruntime-idl)
+target_compile_definitions(nexus_package-installed PRIVATE __WINESRC__)
+target_include_directories(nexus_package-installed PRIVATE "${IDL_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/include")
+target_compile_features(nexus_package-installed PRIVATE cxx_std_17)
+target_link_options(nexus_package-installed PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_package-installed PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+
 if(NEXUS_MIGRATION_PROBES)
     foreach(probe game-relaunch game-relaunch-search async-provider-contract)
         add_executable(nexus_${probe} Nexus/${probe}-probe.c)

@@ -27,6 +27,7 @@
 #include "Package/Content.h"
 #include "Package/Chunks.h"
 #include "Package/Monitors.h"
+#include "Package/InstalledEvents.h"
 
 static HRESULT enumerate_current_package( XPackageKind, XPackageEnumerationScope, void *,
                                           XPackageEnumerationCallback * );
@@ -336,17 +337,13 @@ HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalledLegacy( XTaskQueueH
                                                                      XTaskQueueRegistrationToken *token )
 {
 
-    if ( !token ) return E_INVALIDARG;
-    token->token = 0;
-    if ( !callback ) return E_INVALIDARG;
-    /* Discovery of on-disk packages is not a package-install event service. */
-    return E_NOTIMPL;
+    return installed_package_register( queue, context, callback, token );
 }
 
 BOOLEAN WINAPI XPackageImpl::XPackageUnregisterPackageInstalled( XTaskQueueRegistrationToken token, BOOLEAN wait )
 {
 
-    return TRUE;
+    return installed_package_unregister( token, wait );
 }
 
 HRESULT WINAPI XPackageImpl::XPackageMountLegacy( const char *identifier, XPackageMountHandle *mount )
@@ -519,7 +516,7 @@ HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalled( XTaskQueueHandle 
                                                                XTaskQueueRegistrationToken *token )
 {
 
-    return E_NOTIMPL;
+    return installed_package_register( queue, context, callback, token );
 }
 
 HRESULT WINAPI XPackageImpl::XPackageGetWriteStats( XPackageWriteStats *writeStats )
@@ -571,7 +568,7 @@ HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalled2( XTaskQueueHandle
                                                                 XTaskQueueRegistrationToken *token )
 {
 
-    return E_NOTIMPL;
+    return installed_package_register( queue, context, callback, token );
 }
 
 HRESULT WINAPI XPackageImpl::XPackageMountWithUiAsync( const char *packageIdentifier, XAsyncBlock *async )
