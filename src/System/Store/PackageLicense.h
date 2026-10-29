@@ -142,6 +142,29 @@ static DWORD WINAPI package_license_expiry_worker( void *arg )
     return 0;
 }
 
+/* Unowned durables still get a handle, as the GDK documents; it is never valid. */
+static HRESULT package_license_create_unlicensed( IXThreadingImpl *threading, struct package_license **out )
+{
+    struct package_license *license;
+    HRESULT hr;
+    *out = NULL;
+    if ( !( license = static_cast<std::remove_reference_t<decltype( license )>>( calloc( 1, sizeof( *license ) ) ) ) )
+        return E_OUTOFMEMORY;
+    license->refs = 1;
+    license->lost = TRUE;
+    license->threading = threading;
+    threading->AddRef();
+    license->stop = CreateEventW( NULL, TRUE, FALSE, NULL );
+    if ( !license->stop )
+    {
+        hr = HRESULT_FROM_WIN32( GetLastError() );
+        package_license_release( license );
+        return hr;
+    }
+    *out = license;
+    return S_OK;
+}
+
 static HRESULT package_license_create( IXThreadingImpl *threading, UINT64 until, struct package_license **out )
 {
     struct package_license *license;
@@ -337,7 +360,7 @@ static HRESULT store_license_from_snapshot( struct entitled_snapshot *snapshot, 
             return package_license_create( threading, until, out );
         }
     }
-    return E_ACCESSDENIED;
+    return require_package ? E_ACCESSDENIED : package_license_create_unlicensed( threading, out );
 }
 
 static HRESULT package_license_from_snapshot( struct entitled_snapshot *snapshot, const char *store,
@@ -404,7 +427,7 @@ static HRESULT WINAPI package_license_provider( XAsyncOp op, const XAsyncProvide
     case XAsyncOp::GetResult:
         if ( !data->buffer || data->bufferSize < sizeof( void * ) || !context->license ) return E_INVALIDARG;
         if ( !durable_license_context_valid( context ) ) return E_INVALIDARG;
-        if ( !package_license_valid_object( context->license ) ) return E_ACCESSDENIED;
+        if ( !context->durable && !package_license_valid_object( context->license ) ) return E_ACCESSDENIED;
         AcquireSRWLockExclusive( &package_license_lock );
         context->license->next = package_licenses;
         package_licenses = context->license;

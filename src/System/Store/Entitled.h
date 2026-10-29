@@ -6,6 +6,8 @@
 
 #define ENTITLED_MAX_PRODUCTS 257
 #define ENTITLED_MAX_SKUS 16
+#define CATALOG_MAX_IDS 100
+#define CATALOG_MAX_FILTERS 16
 static char entitled_related[256][13];
 static UINT32 entitled_related_count;
 
@@ -30,6 +32,29 @@ static BOOL entitled_sku_id( const char *text )
 /* Discovery hints do not grant rights. Each candidate still needs a verified
  * signed receipt tied to the current ParentProductId by the licensing service.
  * Invalid/oversized hints are ignored atomically, keeping the manifest intact. */
+/* Optionally SKU-qualified: "9XXXXXXXXXXX/0010". */
+static BOOL entitled_store_id( const char *text, char id[13], char sku[5] )
+{
+    if ( !text || strlen( text ) < 12 ) return FALSE;
+    memcpy( id, text, 12 );
+    id[12] = 0;
+    sku[0] = 0;
+    if ( !entitled_id( id ) ) return FALSE;
+    if ( !text[12] ) return TRUE;
+    if ( text[12] != '/' || !entitled_sku_id( text + 13 ) ) return FALSE;
+    memcpy( sku, text + 13, 5 );
+    return TRUE;
+}
+
+static BOOL entitled_action( const char *text )
+{
+    SIZE_T i, length = text ? strlen( text ) : 0;
+    if ( !length || length > 32 ) return FALSE;
+    for ( i = 0; i < length; i++ )
+        if ( !( ( text[i] >= 'A' && text[i] <= 'Z' ) || ( text[i] >= 'a' && text[i] <= 'z' ) ) ) return FALSE;
+    return TRUE;
+}
+
 static BOOL entitled_merge_hint( char ids[256][13], UINT32 *count, const char *hint )
 {
     char merged[256][13], product[13];
@@ -289,6 +314,7 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
     struct entitled_snapshot *snapshot = NULL;
     UINT64 value;
     UINT32 i = 0, j, k;
+    BOOLEAN catalog = FALSE, owned;
     HRESULT hr = E_UNEXPECTED;
     *out = NULL;
     if ( !response || !size || strstr( response, "<!DOCTYPE" ) || strstr( response, "<!ENTITY" ) ) return hr;
@@ -303,6 +329,8 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
         goto done;
     }
     if ( FAILED( hr = ( HRESULT )value ) ) goto done;
+    if ( entitled_child( root, "Catalog" ) && FAILED( hr = entitled_bool( root, "Catalog", &catalog ) ) ) goto done;
+    hr = E_UNEXPECTED;
     if ( !( snapshot =
                 static_cast<std::remove_reference_t<decltype( snapshot )>>( calloc( 1, sizeof( *snapshot ) ) ) ) )
     {
@@ -368,7 +396,7 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
         if ( FAILED( hr = entitled_bool( node, "HasDigitalDownload", &p->hasDigitalDownload ) ) ||
              FAILED( hr = entitled_bool( node, "IsInUserCollection", &p->isInUserCollection ) ) )
             goto done;
-        if ( !p->isInUserCollection )
+        if ( !catalog && !p->isInUserCollection )
         {
             hr = E_UNEXPECTED;
             goto done;
@@ -389,6 +417,7 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
             goto done;
         }
         j = 0;
+        owned = FALSE;
         for ( sku_node = node->children; sku_node; sku_node = sku_node->next )
         {
             XStoreSku *s;
@@ -414,8 +443,12 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
                 goto done;
             if ( !s->isInUserCollection )
             {
-                hr = E_UNEXPECTED;
-                goto done;
+                if ( !catalog || entitled_child( sku_node, "EndDate" ) )
+                {
+                    hr = E_UNEXPECTED;
+                    goto done;
+                }
+                continue;
             }
             if ( FAILED( hr = entitled_uint( sku_node, "EndDate", &value ) ) ) goto done;
             if ( value <= ( UINT64 )time( NULL ) || value > INT64_MAX )
@@ -425,6 +458,12 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
             }
             s->collectionData.endDate = value;
             s->collectionData.isTrial = s->isTrial;
+            owned = TRUE;
+        }
+        if ( owned != p->isInUserCollection )
+        {
+            hr = E_UNEXPECTED;
+            goto done;
         }
     }
     *out = snapshot;
@@ -591,23 +630,18 @@ static HRESULT entitled_start( struct entitled_async *context, XAsyncBlock *asyn
     return hr;
 }
 
-static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 page_size, XAsyncBlock *async,
-                               BOOL game = FALSE, BOOL current_only = FALSE )
+/* Without ids, the request covers the configured related products. */
+static HRESULT entitled_request( UINT32 kinds, BOOL current_only, const char **ids, SIZE_T ids_count,
+                                 const char **filters, SIZE_T filters_count, char **out )
 {
-    struct entitled_async *context;
     xmlDocPtr doc;
-    xmlNodePtr root;
+    xmlNodePtr root, node;
     xmlChar *bytes = NULL;
-    char kind[16], language[128] = "en-US", market[16] = "US";
+    char kind[16], language[128] = "en-US", market[16] = "US", id[13], sku[5], other[13], other_sku[5];
     WCHAR locale[85], country[16];
-    UINT64 xuid, serial;
-    UINT32 i;
+    SIZE_T i, j;
     int size;
-    HRESULT hr;
-    if ( !async || !kinds || ( kinds & ~31 ) || !page_size ) return E_INVALIDARG;
-    page_size = std::min<UINT32>( page_size, ENTITLED_MAX_PRODUCTS );
-    if ( FAILED( hr = entitled_store_identity( store, &xuid, &serial ) ) ) return hr;
-    if ( !entitled_id( GetStoreProductId() ) ) return E_GAME_MISSING_GAME_CONFIG;
+    *out = NULL;
     if ( GetUserDefaultLocaleName( locale, ARRAY_SIZE( locale ) ) )
         WideCharToMultiByte( CP_UTF8, 0, locale, -1, language, sizeof( language ), NULL, NULL );
     if ( GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, country, ARRAY_SIZE( country ) ) )
@@ -621,9 +655,26 @@ static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 p
     xmlDocSetRootElement( doc, root );
     snprintf( kind, sizeof( kind ), "%u", kinds );
     xmlNewTextChild( root, NULL, BAD_CAST "ParentProductId", BAD_CAST GetStoreProductId() );
-    for ( i = 0; !current_only && i < entitled_related_count; i++ )
-        if ( strcmp( GetStoreProductId(), entitled_related[i] ) )
-            xmlNewTextChild( root, NULL, BAD_CAST "ProductId", BAD_CAST entitled_related[i] );
+    if ( ids )
+    {
+        xmlNewTextChild( root, NULL, BAD_CAST "Catalog", BAD_CAST "true" );
+        for ( i = 0; i < ids_count; i++ )
+        {
+            entitled_store_id( ids[i], id, sku );
+            node = xmlNewTextChild( root, NULL, BAD_CAST "Requested", NULL );
+            xmlNewTextChild( node, NULL, BAD_CAST "StoreId", BAD_CAST id );
+            if ( sku[0] ) xmlNewTextChild( node, NULL, BAD_CAST "SkuId", BAD_CAST sku );
+            if ( !strcmp( GetStoreProductId(), id ) ) continue;
+            for ( j = 0; j < i && ( entitled_store_id( ids[j], other, other_sku ), strcmp( id, other ) ); j++ );
+            if ( j == i ) xmlNewTextChild( root, NULL, BAD_CAST "ProductId", BAD_CAST id );
+        }
+        for ( i = 0; i < filters_count; i++ )
+            xmlNewTextChild( root, NULL, BAD_CAST "ActionFilter", BAD_CAST filters[i] );
+    }
+    else
+        for ( i = 0; !current_only && i < entitled_related_count; i++ )
+            if ( strcmp( GetStoreProductId(), entitled_related[i] ) )
+                xmlNewTextChild( root, NULL, BAD_CAST "ProductId", BAD_CAST entitled_related[i] );
     xmlNewTextChild( root, NULL, BAD_CAST "ProductKinds", BAD_CAST kind );
     xmlNewTextChild( root, NULL, BAD_CAST "Market", BAD_CAST market );
     xmlNewTextChild( root, NULL, BAD_CAST "Language", BAD_CAST language );
@@ -635,24 +686,53 @@ static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 p
         xmlFree( bytes );
         return E_INVALIDARG;
     }
-    context = static_cast<std::remove_reference_t<decltype( context )>>( calloc( 1, sizeof( *context ) ) );
-    if ( context )
-    {
-        context->request = strdup( ( char * )bytes );
-        context->page_size = page_size;
-    }
+    *out = strdup( ( char * )bytes );
     xmlFree( bytes );
-    if ( !context ) return E_OUTOFMEMORY;
-    if ( !context->request )
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 page_size, XAsyncBlock *async,
+                               BOOL game = FALSE, BOOL current_only = FALSE, const char **ids = NULL,
+                               SIZE_T ids_count = 0, const char **filters = NULL, SIZE_T filters_count = 0 )
+{
+    struct entitled_async *context;
+    UINT64 xuid, serial;
+    char *request;
+    HRESULT hr;
+    if ( !async || !kinds || ( kinds & ~31 ) || !page_size ) return E_INVALIDARG;
+    page_size = std::min<UINT32>( page_size, ENTITLED_MAX_PRODUCTS );
+    if ( FAILED( hr = entitled_store_identity( store, &xuid, &serial ) ) ) return hr;
+    if ( !entitled_id( GetStoreProductId() ) ) return E_GAME_MISSING_GAME_CONFIG;
+    if ( FAILED( hr = entitled_request( kinds, current_only, ids, ids_count, filters, filters_count, &request ) ) )
+        return hr;
+    context = static_cast<std::remove_reference_t<decltype( context )>>( calloc( 1, sizeof( *context ) ) );
+    if ( !context )
     {
-        free( context );
+        free( request );
         return E_OUTOFMEMORY;
     }
+    context->request = request;
+    context->page_size = page_size;
     context->store_serial = serial;
     context->store = store;
     context->game = game;
     context->refresh = InterlockedIncrement64( &entitled_next_refresh );
     return entitled_start( context, async, FALSE );
+}
+
+static HRESULT catalog_begin( XStoreContextHandle store, UINT32 kinds, const char **ids, SIZE_T ids_count,
+                              const char **filters, SIZE_T filters_count, XAsyncBlock *async )
+{
+    char id[13], sku[5];
+    SIZE_T i;
+    if ( !ids || !ids_count || ids_count > CATALOG_MAX_IDS ) return E_INVALIDARG;
+    if ( ( filters_count && !filters ) || filters_count > CATALOG_MAX_FILTERS ) return E_INVALIDARG;
+    for ( i = 0; i < ids_count; i++ )
+        if ( !entitled_store_id( ids[i], id, sku ) ) return E_INVALIDARG;
+    for ( i = 0; i < filters_count; i++ )
+        if ( !entitled_action( filters[i] ) ) return E_INVALIDARG;
+    return entitled_begin( store, kinds, ENTITLED_MAX_PRODUCTS, async, FALSE, FALSE, ids, ids_count, filters,
+                           filters_count );
 }
 
 static HRESULT entitled_result( XAsyncBlock *async, XStoreProductQueryHandle *out, BOOL next )

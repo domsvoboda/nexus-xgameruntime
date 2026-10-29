@@ -510,6 +510,24 @@ TEST( NexusAuthentication, HandshakeAcceptsUnsignedTitleEndpointWithoutLosingIde
     EXPECT_EQ( transport.httpCalls, 4u );
     EXPECT_EQ( transport.unexpected, 0u );
 }
+TEST( NexusAuthentication, EndpointPathMatchesWithOrWithoutLeadingSlash )
+{
+    Apartment apartment;
+    SyntheticTransport transport;
+    transport.currentEndpoints = R"({"EndPoints":[{"Protocol":"https","Host":"title.example.invalid","Path":"xbox","RelyingParty":"https://title.example.invalid/","TokenType":"JWT"}]})";
+    auto user = CreateUser( transport );
+    ASSERT_EQ( user->InitializeNetwork( XUserAddOptions::AddDefaultUserSilently ), S_OK );
+    user->initDone = 1;
+    user->initResult = S_OK;
+    endpoint info{};
+    EXPECT_EQ( user->GetEndpointInfo( "https://title.example.invalid/xbox", &info ), S_OK );
+    EXPECT_EQ( user->GetEndpointInfo( "https://title.example.invalid/xbox/login", &info ), S_OK );
+    EXPECT_EQ( user->GetEndpointInfo( "https://title.example.invalid/other", &info ), E_FAIL );
+    EXPECT_EQ( user->GetEndpointInfo( "https://title.example.invalid/", &info ), E_FAIL );
+    EXPECT_EQ( user->GetEndpointInfo( "https://service.example.invalid/api/test", &info ), S_OK );
+    EXPECT_EQ( user->GetEndpointInfo( "https://service.example.invalid/other", &info ), E_FAIL );
+}
+
 TEST( NexusAuthentication, PartialZeroOrOverflowXboxIdsAreNotAuthenticated )
 {
     Apartment apartment;

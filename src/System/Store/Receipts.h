@@ -457,6 +457,16 @@ done:
     return hr;
 }
 
+static UINT32 receipt_kind( const char *type )
+{
+    if ( !strcmp( type, "Consumable" ) ) return 1;
+    if ( !strcmp( type, "Durable" ) ) return 2;
+    if ( !strcmp( type, "Game" ) ) return 4;
+    if ( !strcmp( type, "Pass" ) ) return 8;
+    if ( !strcmp( type, "UnmanagedConsumable" ) ) return 16;
+    return 0;
+}
+
 static HRESULT receipt_metadata_parse( struct receipt_license *license, UINT32 kinds, const BYTE *bytes, SIZE_T size,
                                        xmlNodePtr root )
 {
@@ -464,7 +474,7 @@ static HRESULT receipt_metadata_parse( struct receipt_license *license, UINT32 k
                 *product_properties = NULL;
     IJsonArray *products = NULL, *locals = NULL, *skus = NULL;
     char *id = NULL, *type = NULL, *title = NULL, *lang = NULL, *sku_id = NULL, *offer = NULL;
-    UINT32 kind = 0, count, i;
+    UINT32 kind, count, i;
     boolean trial = FALSE;
     xmlNodePtr node, sku_node;
     char kind_text[8], expiry_text[32];
@@ -477,17 +487,7 @@ static HRESULT receipt_metadata_parse( struct receipt_license *license, UINT32 k
     id = receipt_string( product, L"ProductId", 12 );
     type = receipt_string( product, L"ProductType", 32 );
     if ( !id || strcmp( id, license->id ) || !type ) goto done;
-    if ( !strcmp( type, "Consumable" ) )
-        kind = 1;
-    else if ( !strcmp( type, "Durable" ) )
-        kind = 2;
-    else if ( !strcmp( type, "Game" ) )
-        kind = 4;
-    else if ( !strcmp( type, "Pass" ) )
-        kind = 8;
-    else if ( !strcmp( type, "UnmanagedConsumable" ) )
-        kind = 16;
-    if ( !kind )
+    if ( !( kind = receipt_kind( type ) ) )
     {
         hr = E_NOTIMPL;
         goto done;
@@ -613,13 +613,269 @@ static HRESULT receipt_metadata( struct receipt_license *license, UINT32 kinds, 
     return hr;
 }
 
+struct catalog_entry
+{
+    char id[13], sku[5];
+};
+
+static BOOL catalog_wants_sku( const struct catalog_entry *requested, UINT32 count, const char *id, const char *sku )
+{
+    UINT32 i;
+    for ( i = 0; i < count; i++ )
+        if ( !strcmp( requested[i].id, id ) && ( !requested[i].sku[0] || !strcmp( requested[i].sku, sku ) ) )
+            return TRUE;
+    return FALSE;
+}
+
+static WCHAR catalog_lower( WCHAR c )
+{
+    return c >= 'A' && c <= 'Z' ? c + 'a' - 'A' : c;
+}
+
+/* A SKU qualifies when any availability allows a requested action. */
+static BOOL catalog_available( IJsonObject *entry, const char **filters, UINT32 filter_count )
+{
+    IJsonArray *availabilities = NULL, *actions = NULL;
+    IJsonObject *availability = NULL;
+    HSTRING text;
+    const WCHAR *action;
+    UINT32 count = 0, action_count, length, i, j, k, c;
+    BOOL found = FALSE;
+    if ( !filter_count ) return TRUE;
+    if ( FAILED( receipt_get_array( entry, L"Availabilities", &availabilities ) ) ) return FALSE;
+    if ( FAILED( receipt_array_size( availabilities, &count ) ) ) count = 0;
+    for ( i = 0; i < count && !found; i++ )
+    {
+        if ( FAILED( availabilities->GetObjectAt( i, &availability ) ) ) continue;
+        if ( SUCCEEDED( receipt_get_array( availability, L"Actions", &actions ) ) )
+        {
+            if ( FAILED( receipt_array_size( actions, &action_count ) ) ) action_count = 0;
+            for ( j = 0; j < action_count && !found; j++ )
+            {
+                if ( FAILED( actions->GetStringAt( j, &text ) ) ) continue;
+                action = WindowsGetStringRawBuffer( text, &length );
+                for ( k = 0; k < filter_count && !found; k++ )
+                {
+                    if ( strlen( filters[k] ) != length ) continue;
+                    for ( c = 0; c < length && catalog_lower( action[c] ) == catalog_lower( filters[k][c] ); c++ );
+                    found = c == length;
+                }
+                WindowsDeleteString( text );
+            }
+            actions->Release();
+            actions = NULL;
+        }
+        availability->Release();
+        availability = NULL;
+    }
+    availabilities->Release();
+    return found;
+}
+
+/* Only the signed receipt licenses mark a SKU as owned, never the catalog. */
+static HRESULT receipt_catalog_parse( const char *id, const struct catalog_entry *requested, UINT32 requested_count,
+                                      const struct receipt_license *licenses, UINT32 license_count, UINT32 kinds,
+                                      const char **filters, UINT32 filter_count, const BYTE *bytes, SIZE_T size,
+                                      xmlNodePtr root )
+{
+    IJsonObject *document = NULL, *product = NULL, *localized = NULL, *product_properties = NULL;
+    IJsonArray *products = NULL, *locals = NULL, *skus = NULL;
+    char *product_id = NULL, *type = NULL, *title = NULL, *lang = NULL, *offer = NULL;
+    UINT32 kind, count, i, j;
+    BOOL owned = FALSE, download = FALSE;
+    xmlNodePtr node = NULL, sku_node;
+    char kind_text[8], expiry_text[32];
+    HRESULT hr = E_UNEXPECTED;
+    if ( FAILED( receipt_json( bytes, size, &document ) ) ||
+         FAILED( receipt_get_array( document, L"Products", &products ) ) ||
+         FAILED( receipt_array_size( products, &count ) ) )
+        goto done;
+    if ( !count )
+    {
+        hr = S_OK;
+        goto done;
+    }
+    if ( count != 1 || FAILED( products->GetObjectAt( 0, &product ) ) ) goto done;
+    product_id = receipt_string( product, L"ProductId", 12 );
+    type = receipt_string( product, L"ProductType", 32 );
+    if ( !product_id || strcmp( product_id, id ) || !type ) goto done;
+    if ( !( kind = receipt_kind( type ) ) || !( kind & kinds ) )
+    {
+        hr = S_OK;
+        goto done;
+    }
+    if ( SUCCEEDED( receipt_get_object( product, L"Properties", &product_properties ) ) )
+        offer = receipt_string( product_properties, L"InAppOfferToken", 256 );
+    if ( FAILED( receipt_get_array( product, L"LocalizedProperties", &locals ) ) ||
+         FAILED( locals->GetObjectAt( 0, &localized ) ) ||
+         !( title = receipt_string( localized, L"ProductTitle", 1024 ) ) ||
+         !( lang = receipt_string( localized, L"Language", 35 ) ) ||
+         FAILED( receipt_get_array( product, L"DisplaySkuAvailabilities", &skus ) ) ||
+         FAILED( receipt_array_size( skus, &count ) ) || count > 100 )
+        goto done;
+    snprintf( kind_text, sizeof( kind_text ), "%u", kind );
+    for ( i = 0; i < count; i++ )
+    {
+        IJsonObject *entry = NULL, *sku = NULL, *properties = NULL;
+        IJsonArray *packages = NULL;
+        const struct receipt_license *license = NULL;
+        UINT32 packages_count = 0;
+        char *sku_id = NULL;
+        boolean trial;
+        hr = E_UNEXPECTED;
+        if ( FAILED( skus->GetObjectAt( i, &entry ) ) || FAILED( receipt_get_object( entry, L"Sku", &sku ) ) )
+            goto next;
+        sku_id = receipt_string( sku, L"SkuId", 4 );
+        if ( !entitled_sku_id( sku_id ) ) goto next;
+        hr = S_OK;
+        if ( !catalog_wants_sku( requested, requested_count, id, sku_id ) ||
+             !catalog_available( entry, filters, filter_count ) )
+            goto next;
+        for ( j = 0; j < license_count; j++ )
+            if ( !strcmp( licenses[j].id, id ) && !strcmp( licenses[j].sku, sku_id ) )
+            {
+                license = &licenses[j];
+                break;
+            }
+        /* Unknown trial state must not be advertised as a full SKU. */
+        if ( FAILED( receipt_get_object( sku, L"Properties", &properties ) ) ||
+             FAILED( receipt_get_boolean( properties, L"IsTrial", &trial ) ) )
+        {
+            if ( license ) hr = E_UNEXPECTED;
+            goto next;
+        }
+        if ( !node )
+        {
+            if ( !( node = xmlNewTextChild( root, NULL, BAD_CAST "Product", NULL ) ) )
+            {
+                hr = E_OUTOFMEMORY;
+                goto next;
+            }
+            xmlNewTextChild( node, NULL, BAD_CAST "StoreId", BAD_CAST id );
+            xmlNewTextChild( node, NULL, BAD_CAST "Title", BAD_CAST title );
+            xmlNewTextChild( node, NULL, BAD_CAST "Description", BAD_CAST "" );
+            xmlNewTextChild( node, NULL, BAD_CAST "Language", BAD_CAST lang );
+            xmlNewTextChild( node, NULL, BAD_CAST "InAppOfferToken", BAD_CAST( offer ? offer : "" ) );
+            xmlNewTextChild( node, NULL, BAD_CAST "ProductKind", BAD_CAST kind_text );
+            xmlNewTextChild( node, NULL, BAD_CAST "HasDigitalDownload", BAD_CAST "false" );
+            xmlNewTextChild( node, NULL, BAD_CAST "IsInUserCollection", BAD_CAST "false" );
+        }
+        if ( SUCCEEDED( receipt_get_array( properties, L"Packages", &packages ) ) )
+        {
+            receipt_array_size( packages, &packages_count );
+            packages->Release();
+        }
+        if ( packages_count ) download = TRUE;
+        if ( !( sku_node = xmlNewTextChild( node, NULL, BAD_CAST "Sku", NULL ) ) )
+        {
+            hr = E_OUTOFMEMORY;
+            goto next;
+        }
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "SkuId", BAD_CAST sku_id );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "Title", BAD_CAST title );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "Description", BAD_CAST "" );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "Language", BAD_CAST lang );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "IsTrial", BAD_CAST( trial ? "true" : "false" ) );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "IsInUserCollection", BAD_CAST( license ? "true" : "false" ) );
+        if ( license )
+        {
+            snprintf( expiry_text, sizeof( expiry_text ), "%llu", ( unsigned long long )license->expiry );
+            xmlNewTextChild( sku_node, NULL, BAD_CAST "EndDate", BAD_CAST expiry_text );
+            owned = TRUE;
+        }
+    next:
+        if ( entry ) entry->Release();
+        if ( sku ) sku->Release();
+        if ( properties ) properties->Release();
+        free( sku_id );
+        if ( FAILED( hr ) ) goto done;
+    }
+    if ( node )
+    {
+        if ( download ) xmlNodeSetContent( entitled_child( node, "HasDigitalDownload" ), BAD_CAST "true" );
+        if ( owned ) xmlNodeSetContent( entitled_child( node, "IsInUserCollection" ), BAD_CAST "true" );
+    }
+    hr = S_OK;
+done:
+    if ( document ) document->Release();
+    if ( product ) product->Release();
+    if ( localized ) localized->Release();
+    if ( product_properties ) product_properties->Release();
+    if ( products ) products->Release();
+    if ( locals ) locals->Release();
+    if ( skus ) skus->Release();
+    free( product_id );
+    free( type );
+    free( title );
+    free( lang );
+    free( offer );
+    return hr;
+}
+
+static HRESULT catalog_request( xmlNodePtr root, struct catalog_entry *requested, UINT32 *requested_count,
+                                char **filters, UINT32 *filter_count )
+{
+    xmlNodePtr node;
+    char *id, *sku;
+    *requested_count = *filter_count = 0;
+    for ( node = root->children; node; node = node->next )
+    {
+        if ( node->type != XML_ELEMENT_NODE ) continue;
+        if ( !strcmp( ( char * )node->name, "Requested" ) )
+        {
+            if ( *requested_count == CATALOG_MAX_IDS ) return E_UNEXPECTED;
+            id = entitled_text( node, "StoreId" );
+            sku = entitled_child( node, "SkuId" ) ? entitled_text( node, "SkuId" ) : NULL;
+            if ( !entitled_id( id ) || ( entitled_child( node, "SkuId" ) && !entitled_sku_id( sku ) ) )
+            {
+                free( id );
+                free( sku );
+                return E_UNEXPECTED;
+            }
+            strcpy( requested[*requested_count].id, id );
+            strcpy( requested[( *requested_count )++].sku, sku ? sku : "" );
+            free( id );
+            free( sku );
+        }
+        else if ( !strcmp( ( char * )node->name, "ActionFilter" ) )
+        {
+            if ( *filter_count == CATALOG_MAX_FILTERS ) return E_UNEXPECTED;
+            filters[*filter_count] = ( char * )xmlNodeGetContent( node );
+            if ( !entitled_action( filters[( *filter_count )++] ) ) return E_UNEXPECTED;
+        }
+    }
+    return *requested_count ? S_OK : E_UNEXPECTED;
+}
+
+static HRESULT catalog_metadata( const char *id, const struct catalog_entry *requested, UINT32 requested_count,
+                                 const struct receipt_license *licenses, UINT32 license_count, UINT32 kinds,
+                                 const char **filters, UINT32 filter_count, const char *market, const char *language,
+                                 xmlNodePtr root )
+{
+    WCHAR path[256];
+    BYTE *bytes = NULL;
+    SIZE_T size;
+    HRESULT hr;
+    if ( swprintf( path, ARRAY_SIZE( path ), L"/v7.0/products?bigIds=%hs&market=%hs&languages=%hs", id, market,
+                   language ) < 0 )
+        return E_UNEXPECTED;
+    hr = receipt_public_get( L"displaycatalog.mp.microsoft.com", path, 4 * 1024 * 1024, &bytes, &size );
+    if ( SUCCEEDED( hr ) )
+        hr = receipt_catalog_parse( id, requested, requested_count, licenses, license_count, kinds, filters,
+                                    filter_count, bytes, size, root );
+    free( bytes );
+    return hr;
+}
+
 static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entitled_snapshot **out )
 {
     xmlDocPtr doc = NULL, result = NULL;
     xmlNodePtr root, node, response_root;
-    char *ids[ENTITLED_MAX_PRODUCTS] = { 0 }, *market = NULL, *language = NULL;
+    char *ids[ENTITLED_MAX_PRODUCTS] = { 0 }, *market = NULL, *language = NULL, *filters[CATALOG_MAX_FILTERS] = { 0 };
     struct receipt_license licenses[ENTITLED_MAX_PRODUCTS];
-    UINT32 count = 0, license_count = 0, i, j, batch;
+    struct catalog_entry requested[CATALOG_MAX_IDS];
+    UINT32 count = 0, license_count = 0, requested_count = 0, filter_count = 0, i, j, batch;
+    BOOL catalog;
     UINT64 kinds, expiry = UINT64_MAX, proof_until = 0;
     ULONGLONG deadline = GetTickCount64() + 120000;
     char number[32];
@@ -637,6 +893,9 @@ static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entit
         }
     for ( i = 0; i < count; i++ )
         if ( !entitled_id( ids[i] ) ) goto done;
+    if ( ( catalog = entitled_child( root, "Catalog" ) != NULL ) &&
+         FAILED( catalog_request( root, requested, &requested_count, filters, &filter_count ) ) )
+        goto done;
     market = entitled_text( root, "Market" );
     language = entitled_text( root, "Language" );
     if ( !market || strlen( market ) != 2 || !language || strlen( language ) > 35 ||
@@ -703,7 +962,27 @@ static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entit
     }
     xmlDocSetRootElement( result, response_root );
     xmlNewTextChild( response_root, NULL, BAD_CAST "HResult", BAD_CAST "0" );
-    for ( i = 0; i < license_count; i++ )
+    if ( catalog ) xmlNewTextChild( response_root, NULL, BAD_CAST "Catalog", BAD_CAST "true" );
+    for ( i = 0; catalog && i < requested_count; i++ )
+    {
+        for ( j = 0; j < i && strcmp( requested[j].id, requested[i].id ); j++ );
+        if ( j < i ) continue;
+        if ( InterlockedCompareExchange( canceled, 0, 0 ) )
+        {
+            hr = E_ABORT;
+            goto done;
+        }
+        if ( GetTickCount64() >= deadline )
+        {
+            hr = HRESULT_FROM_WIN32( ERROR_TIMEOUT );
+            goto done;
+        }
+        hr = catalog_metadata( requested[i].id, requested, requested_count, licenses, license_count, kinds,
+                               ( const char ** )filters, filter_count, market, language, response_root );
+        xodus_store_license_note( "store-catalog-metadata", hr );
+        if ( FAILED( hr ) ) goto done;
+    }
+    for ( i = 0; !catalog && i < license_count; i++ )
     {
         if ( InterlockedCompareExchange( canceled, 0, 0 ) )
         {
@@ -740,6 +1019,8 @@ static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entit
 done:
     for ( i = 0; i < count; i++ )
         free( ids[i] );
+    for ( i = 0; i < filter_count; i++ )
+        xmlFree( filters[i] );
     free( market );
     free( language );
     if ( doc ) xmlFreeDoc( doc );

@@ -537,6 +537,289 @@ struct license_callback_context
     BOOL ok, waited;
     HANDLE started, gate, wait_started, finished;
 };
+static const char catalog_json[] =
+    "{\"Products\":[{\"ProductId\":\"B00000000002\",\"ProductType\":\"Durable\",\"Properties\":{\"InAppOfferToken\":"
+    "\"Synthetic DLC\"},\"LocalizedProperties\":[{\"ProductTitle\":\"Synthetic DLC\",\"Language\":\"en-US\"}],"
+    "\"DisplaySkuAvailabilities\":[{\"Sku\":{\"SkuId\":\"0010\",\"Properties\":{\"IsTrial\":false,\"Packages\":[{}]}},"
+    "\"Availabilities\":[{\"Actions\":[\"Details\",\"Purchase\"]}]},{\"Sku\":{\"SkuId\":\"0020\",\"Properties\":{"
+    "\"IsTrial\":true}},\"Availabilities\":[{\"Actions\":[\"Details\"]}]},{\"Sku\":{\"SkuId\":\"0030\",\"Properties\":{}},"
+    "\"Availabilities\":[{\"Actions\":[\"Details\"]}]}]}]}";
+static const char catalog_game_json[] =
+    "{\"Products\":[{\"ProductId\":\"B00000000001\",\"ProductType\":\"Game\",\"LocalizedProperties\":[{\"ProductTitle\":"
+    "\"Synthetic game\",\"Language\":\"en-US\"}],\"DisplaySkuAvailabilities\":[{\"Sku\":{\"SkuId\":\"0010\","
+    "\"Properties\":{\"IsTrial\":false,\"Packages\":[{}]}},\"Availabilities\":[{\"Actions\":[\"License\"]}]}]}]}";
+
+static xmlDocPtr catalog_response( xmlNodePtr *root, BOOL catalog )
+{
+    xmlDocPtr doc = xmlNewDoc( BAD_CAST "1.0" );
+    char until[32];
+    *root = xmlNewNode( NULL, BAD_CAST "Response" );
+    xmlDocSetRootElement( doc, *root );
+    xmlNewTextChild( *root, NULL, BAD_CAST "HResult", BAD_CAST "0" );
+    if ( catalog ) xmlNewTextChild( *root, NULL, BAD_CAST "Catalog", BAD_CAST "true" );
+    snprintf( until, sizeof( until ), "%llu", ( unsigned long long )time( NULL ) + 60 );
+    xmlNewTextChild( *root, NULL, BAD_CAST "ValidUntil", BAD_CAST until );
+    return doc;
+}
+
+static HRESULT catalog_parse_doc( xmlDocPtr doc, struct entitled_snapshot **snapshot )
+{
+    xmlChar *bytes;
+    int size;
+    HRESULT hr;
+    xmlDocDumpMemory( doc, &bytes, &size );
+    hr = entitled_parse( ( char * )bytes, size, snapshot );
+    xmlFree( bytes );
+    return hr;
+}
+
+static HRESULT catalog_case( const char *json, const char *id, const char *request,
+                             const struct receipt_license *licenses, UINT32 license_count, UINT32 kinds,
+                             const char **filters, UINT32 filter_count, struct entitled_snapshot **snapshot )
+{
+    struct catalog_entry requested = {};
+    xmlNodePtr root;
+    xmlDocPtr doc = catalog_response( &root, TRUE );
+    HRESULT hr;
+    *snapshot = NULL;
+    entitled_store_id( request, requested.id, requested.sku );
+    hr = receipt_catalog_parse( id, &requested, 1, licenses, license_count, kinds, filters, filter_count,
+                                ( const BYTE * )json, strlen( json ), root );
+    if ( SUCCEEDED( hr ) ) hr = catalog_parse_doc( doc, snapshot );
+    xmlFreeDoc( doc );
+    return hr;
+}
+
+static const XStoreSku *catalog_sku( const XStoreProduct *product, const char *id )
+{
+    for ( UINT32 i = 0; i < product->skusCount; i++ )
+        if ( !strcmp( product->skus[i].skuId, id ) ) return &product->skus[i];
+    return NULL;
+}
+
+static unsigned catalog_seen, catalog_owned;
+static BOOLEAN CALLBACK catalog_enumerate( const XStoreProduct *product, void *context )
+{
+    catalog_seen++;
+    if ( product->isInUserCollection ) catalog_owned++;
+    return TRUE;
+}
+
+static void test_catalog( void )
+{
+    struct receipt_license owned = { "B00000000002", "0010", 0 }, game = { "B00000000001", "0010", 0 },
+                           undescribed = { "B00000000002", "0030", 0 };
+    struct entitled_snapshot *snapshot = NULL;
+    const char *purchase[] = { "purchase" }, *license_action[] = { "License" };
+    const XStoreSku *sku;
+    IXThreadingImpl *threads = NULL;
+    XTaskQueueHandle queue = NULL;
+    XStoreContextHandle store = NULL;
+    XStoreProductQueryHandle next;
+    XAsyncBlock block = { 0 };
+    owned.expiry = game.expiry = undescribed.expiry = time( NULL ) + 3600;
+
+    CHECK( "catalog-unowned",
+           catalog_case( catalog_json, "B00000000002", "B00000000002", NULL, 0, 31, NULL, 0, &snapshot ) == S_OK &&
+               snapshot && snapshot->count == 1 );
+    if ( snapshot && snapshot->count == 1 )
+    {
+        const XStoreProduct *p = &snapshot->products[0];
+        CHECK( "catalog-unowned-product", !p->isInUserCollection && p->productKind == XStoreProductKind::Durable &&
+                                              !strcmp( p->inAppOfferToken, "Synthetic DLC" ) && p->hasDigitalDownload );
+        CHECK( "catalog-unowned-skus", p->skusCount == 2 && ( sku = catalog_sku( p, "0010" ) ) &&
+                                           !sku->isInUserCollection && !sku->collectionData.endDate &&
+                                           ( sku = catalog_sku( p, "0020" ) ) && sku->isTrial );
+        CHECK( "catalog-undescribed-unowned-sku-omitted", !catalog_sku( p, "0030" ) );
+    }
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+
+    CHECK( "catalog-owned",
+           catalog_case( catalog_json, "B00000000002", "B00000000002", &owned, 1, 31, NULL, 0, &snapshot ) == S_OK &&
+               snapshot && snapshot->count == 1 );
+    if ( snapshot && snapshot->count == 1 )
+    {
+        const XStoreProduct *p = &snapshot->products[0];
+        CHECK( "catalog-owned-sku", p->isInUserCollection && ( sku = catalog_sku( p, "0010" ) ) &&
+                                        sku->isInUserCollection && sku->collectionData.endDate == ( INT64 )owned.expiry );
+        CHECK( "catalog-other-sku-unowned", ( sku = catalog_sku( p, "0020" ) ) && !sku->isInUserCollection );
+    }
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+
+    CHECK( "catalog-sku-selection",
+           catalog_case( catalog_json, "B00000000002", "B00000000002/0020", &owned, 1, 31, NULL, 0, &snapshot ) ==
+                   S_OK &&
+               snapshot && snapshot->count == 1 && snapshot->products[0].skusCount == 1 &&
+               !strcmp( snapshot->products[0].skus[0].skuId, "0020" ) && !snapshot->products[0].isInUserCollection );
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+    CHECK( "catalog-missing-sku-no-product",
+           catalog_case( catalog_json, "B00000000002", "B00000000002/0040", NULL, 0, 31, NULL, 0, &snapshot ) == S_OK &&
+               snapshot && !snapshot->count );
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+    CHECK( "catalog-action-filter",
+           catalog_case( catalog_json, "B00000000002", "B00000000002", NULL, 0, 31, purchase, 1, &snapshot ) == S_OK &&
+               snapshot && snapshot->count == 1 && snapshot->products[0].skusCount == 1 &&
+               !strcmp( snapshot->products[0].skus[0].skuId, "0010" ) );
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+    CHECK( "catalog-action-filter-excludes",
+           catalog_case( catalog_json, "B00000000002", "B00000000002", &owned, 1, 31, license_action, 1, &snapshot ) ==
+                   S_OK &&
+               snapshot && !snapshot->count );
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+    CHECK( "catalog-kind-filter", catalog_case( catalog_json, "B00000000002", "B00000000002", &owned, 1,
+                                                static_cast<UINT32>( XStoreProductKind::Game ), NULL, 0,
+                                                &snapshot ) == S_OK &&
+                                      snapshot && !snapshot->count );
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+    CHECK( "catalog-unknown-product", catalog_case( "{\"Products\":[]}", "B00000000002", "B00000000002", NULL, 0, 31,
+                                                    NULL, 0, &snapshot ) == S_OK &&
+                                          snapshot && !snapshot->count );
+    if ( snapshot ) entitled_snapshot_release( snapshot );
+    CHECK( "catalog-owned-sku-needs-trial-state",
+           FAILED( catalog_case( catalog_json, "B00000000002", "B00000000002", &undescribed, 1, 31, NULL, 0,
+                                 &snapshot ) ) &&
+               !snapshot );
+    CHECK( "catalog-wrong-product-rejected", FAILED( catalog_case( catalog_json, "B00000000003", "B00000000003", NULL,
+                                                                   0, 31, NULL, 0, &snapshot ) ) &&
+                                                 !snapshot );
+    {
+        xmlNodePtr root, product, sku_node;
+        xmlDocPtr doc = catalog_response( &root, FALSE );
+        struct catalog_entry requested = { "B00000000002", "" };
+        receipt_catalog_parse( "B00000000002", &requested, 1, NULL, 0, 31, NULL, 0, ( const BYTE * )catalog_json,
+                               strlen( catalog_json ), root );
+        CHECK( "entitled-response-rejects-unowned", FAILED( catalog_parse_doc( doc, &snapshot ) ) && !snapshot );
+        xmlFreeDoc( doc );
+        doc = catalog_response( &root, TRUE );
+        receipt_catalog_parse( "B00000000002", &requested, 1, NULL, 0, 31, NULL, 0, ( const BYTE * )catalog_json,
+                               strlen( catalog_json ), root );
+        product = entitled_child( root, "Product" );
+        xmlNodeSetContent( entitled_child( product, "IsInUserCollection" ), BAD_CAST "true" );
+        CHECK( "catalog-owned-product-needs-owned-sku", FAILED( catalog_parse_doc( doc, &snapshot ) ) && !snapshot );
+        xmlNodeSetContent( entitled_child( product, "IsInUserCollection" ), BAD_CAST "false" );
+        for ( sku_node = product->children; sku_node && strcmp( ( char * )sku_node->name, "Sku" );
+              sku_node = sku_node->next );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "EndDate", BAD_CAST "9999999999" );
+        CHECK( "catalog-unowned-sku-no-end-date", FAILED( catalog_parse_doc( doc, &snapshot ) ) && !snapshot );
+        xmlFreeDoc( doc );
+    }
+    {
+        struct catalog_entry requested[] = { { "B00000000001", "" }, { "B00000000002", "" }, { "B00000000003", "" } };
+        struct entitled_page *page;
+        xmlNodePtr root;
+        xmlDocPtr doc = catalog_response( &root, TRUE );
+        CHECK( "catalog-query-game",
+               receipt_catalog_parse( "B00000000001", requested, 3, &game, 1, 31, NULL, 0,
+                                      ( const BYTE * )catalog_game_json, strlen( catalog_game_json ), root ) == S_OK );
+        CHECK( "catalog-query-addon",
+               receipt_catalog_parse( "B00000000002", requested, 3, &game, 1, 31, NULL, 0, ( const BYTE * )catalog_json,
+                                      strlen( catalog_json ), root ) == S_OK );
+        CHECK( "catalog-query-unknown", receipt_catalog_parse( "B00000000003", requested, 3, &game, 1, 31, NULL, 0,
+                                                               ( const BYTE * )"{\"Products\":[]}", 15, root ) == S_OK );
+        CHECK( "catalog-query-snapshot",
+               catalog_parse_doc( doc, &snapshot ) == S_OK && snapshot && snapshot->count == 2 );
+        xmlFreeDoc( doc );
+        if ( snapshot )
+        {
+            CHECK( "catalog-query-game-owned", !strcmp( snapshot->products[0].storeId, "B00000000001" ) &&
+                                                   snapshot->products[0].isInUserCollection );
+            page = static_cast<struct entitled_page *>( calloc( 1, sizeof( *page ) ) );
+            page->refs = 1;
+            page->snapshot = snapshot;
+            page->size = ENTITLED_MAX_PRODUCTS;
+            AcquireSRWLockExclusive( &entitled_pages_lock );
+            page->next = entitled_pages;
+            entitled_pages = page;
+            ReleaseSRWLockExclusive( &entitled_pages_lock );
+            catalog_seen = catalog_owned = 0;
+            CHECK( "catalog-query-enumerate", entitled_enumerate( page, NULL, catalog_enumerate ) == S_OK &&
+                                                  catalog_seen == 2 && catalog_owned == 1 );
+            CHECK( "catalog-query-single-page", !entitled_has_more( page ) );
+            entitled_page_close( page );
+            snapshot = NULL;
+        }
+    }
+    {
+        struct catalog_entry requested = { "B00000000002", "" };
+        xmlNodePtr root;
+        xmlDocPtr doc = catalog_response( &root, TRUE );
+        public_requests = public_sends = 0;
+        CHECK( "catalog-public-no-network-grant", FAILED( catalog_metadata( "B00000000002", &requested, 1, NULL, 0, 31,
+                                                                             NULL, 0, "US", "en-US", root ) ) );
+        CHECK( "catalog-public-path-exact",
+               public_requests == 1 && !wcscmp( public_path, L"/v7.0/products?bigIds=B00000000002&market=US&languages=en-US" ) );
+        xmlFreeDoc( doc );
+    }
+    {
+        const char *ids[] = { "B00000000002/0010", "B00000000002", "B00000000003/0020", "B00000000001" },
+                   *filters[] = { "Purchase" };
+        struct catalog_entry requested[CATALOG_MAX_IDS];
+        char *request = NULL, *parsed_filters[CATALOG_MAX_FILTERS] = { 0 };
+        UINT32 requested_count = 0, filter_count = 0, products = 0;
+        xmlDocPtr doc = NULL;
+        CHECK( "catalog-request", entitled_request( 31, FALSE, ids, 4, filters, 1, &request ) == S_OK && request );
+        if ( request && ( doc = xmlReadMemory( request, strlen( request ), NULL, NULL, XML_PARSE_NONET ) ) )
+        {
+            xmlNodePtr root = xmlDocGetRootElement( doc );
+            for ( xmlNodePtr node = root->children; node; node = node->next )
+                if ( node->type == XML_ELEMENT_NODE && !strcmp( ( char * )node->name, "ProductId" ) ) products++;
+            CHECK( "catalog-request-receipt-ids", products == 2 );
+            CHECK( "catalog-request-parsed",
+                   catalog_request( root, requested, &requested_count, parsed_filters, &filter_count ) == S_OK );
+            CHECK( "catalog-request-sku-kept", requested_count == 4 && !strcmp( requested[0].sku, "0010" ) &&
+                                                   !requested[1].sku[0] && !strcmp( requested[2].sku, "0020" ) );
+            CHECK( "catalog-request-filters", filter_count == 1 && !strcmp( parsed_filters[0], "Purchase" ) );
+            for ( UINT32 i = 0; i < filter_count; i++ )
+                xmlFree( parsed_filters[i] );
+            xmlFreeDoc( doc );
+        }
+        free( request );
+    }
+    {
+        const char *ids[CATALOG_MAX_IDS + 1], *filters[CATALOG_MAX_FILTERS + 1], *bad[] = { "not-a-store-id" },
+                                                                                 *bad_filter[] = { "Pur chase" };
+        char storage[CATALOG_MAX_IDS + 1][13];
+        for ( UINT32 i = 0; i <= CATALOG_MAX_IDS; i++ )
+        {
+            sprintf( storage[i], "C%011u", i );
+            ids[i] = storage[i];
+        }
+        for ( UINT32 i = 0; i <= CATALOG_MAX_FILTERS; i++ )
+            filters[i] = "Purchase";
+        CHECK( "catalog-threading",
+               FixtureQueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&threads ) == S_OK && threads );
+        if ( !threads ) return;
+        CHECK( "catalog-queue", threads->XTaskQueueCreate( XTaskQueueDispatchMode::Manual,
+                                                           XTaskQueueDispatchMode::Manual, &queue ) == S_OK );
+        CHECK( "catalog-store", entitled_store_create( NULL, &store ) == S_OK );
+        CHECK( "catalog-ids-required", catalog_begin( store, 31, NULL, 1, NULL, 0, &block ) == E_INVALIDARG &&
+                                           catalog_begin( store, 31, ids, 0, NULL, 0, &block ) == E_INVALIDARG );
+        CHECK( "catalog-id-limit",
+               catalog_begin( store, 31, ids, CATALOG_MAX_IDS + 1, NULL, 0, &block ) == E_INVALIDARG );
+        CHECK( "catalog-id-malformed", catalog_begin( store, 31, bad, 1, NULL, 0, &block ) == E_INVALIDARG );
+        CHECK( "catalog-filters-required", catalog_begin( store, 31, ids, 1, NULL, 1, &block ) == E_INVALIDARG );
+        CHECK( "catalog-filter-limit",
+               catalog_begin( store, 31, ids, 1, filters, CATALOG_MAX_FILTERS + 1, &block ) == E_INVALIDARG );
+        CHECK( "catalog-filter-malformed", catalog_begin( store, 31, ids, 1, bad_filter, 1, &block ) == E_INVALIDARG );
+        CHECK( "catalog-kinds", catalog_begin( store, 32, ids, 1, NULL, 0, &block ) == E_INVALIDARG );
+        ResetEvent( bridge_started );
+        SetEvent( bridge_gate );
+        callbacks = 0;
+        block.queue = queue;
+        block.callback = complete;
+        CHECK( "catalog-id-limit-accepted",
+               catalog_begin( store, 31, ids, CATALOG_MAX_IDS, filters, CATALOG_MAX_FILTERS, &block ) == S_OK );
+        CHECK( "catalog-work", threads->XTaskQueueDispatch( queue, XTaskQueuePort::Work, 0 ) );
+        dispatch_until_complete( threads, queue, &block );
+        CHECK( "catalog-failure-propagated", threads->XAsyncGetStatus( &block, FALSE ) == E_FAIL && callbacks == 1 );
+        next = ( void * )1;
+        CHECK( "catalog-failure-no-query-handle", FAILED( entitled_result( &block, &next, FALSE ) ) && !next );
+        entitled_store_close( store );
+        threads->XTaskQueueCloseHandle( queue );
+        threads->Release();
+    }
+}
+
 static LONG lost_callbacks;
 
 static void CALLBACK license_lost( void *arg )
@@ -580,6 +863,15 @@ static DWORD WINAPI wait_test_unregister( void *arg )
     context->waited = package_license_unregister( context->handle, context->token, TRUE );
     SetEvent( context->finished );
     return 0;
+}
+
+static BOOL durable_unlicensed( struct entitled_snapshot *proof, const char *store, IXThreadingImpl *threads )
+{
+    struct package_license *license = NULL;
+    BOOL unlicensed = durable_license_from_snapshot( proof, store, threads, &license ) == S_OK && license &&
+                      !package_license_valid_object( license );
+    if ( license ) package_license_dispose( license );
+    return unlicensed;
 }
 
 static void test_package_licenses( void )
@@ -645,30 +937,23 @@ static void test_package_licenses( void )
            durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
     proof.proof_until = time( NULL ) + 60;
     sku.isTrial = TRUE;
-    CHECK( "durable-trial-no-grant",
-           durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-trial-no-grant", durable_unlicensed( &proof, product.storeId, threads ) );
     sku.isTrial = FALSE;
     sku.isInUserCollection = FALSE;
-    CHECK( "durable-unowned-sku-no-grant",
-           durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-unowned-sku-no-grant", durable_unlicensed( &proof, product.storeId, threads ) );
     sku.isInUserCollection = TRUE;
     product.isInUserCollection = FALSE;
-    CHECK( "durable-unowned-product-no-grant",
-           durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-unowned-product-no-grant", durable_unlicensed( &proof, product.storeId, threads ) );
     product.isInUserCollection = TRUE;
-    CHECK( "durable-wrong-product-no-grant",
-           durable_license_from_snapshot( &proof, "B00000000002", threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-wrong-product-no-grant", durable_unlicensed( &proof, "B00000000002", threads ) );
     sku.collectionData.endDate = -1;
-    CHECK( "durable-negative-expiry-no-grant",
-           durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-negative-expiry-no-grant", durable_unlicensed( &proof, product.storeId, threads ) );
     sku.collectionData.endDate = time( NULL ) - 1;
-    CHECK( "durable-expired-sku-no-grant",
-           durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-expired-sku-no-grant", durable_unlicensed( &proof, product.storeId, threads ) );
     sku.collectionData.endDate = time( NULL ) + 3600;
     product.hasDigitalDownload = TRUE;
     product.productKind = XStoreProductKind::Game;
-    CHECK( "durable-base-no-grant",
-           durable_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED && !license );
+    CHECK( "durable-base-no-grant", durable_unlicensed( &proof, product.storeId, threads ) );
     CHECK( "license-base-not-durable",
            package_license_from_snapshot( &proof, product.storeId, threads, &license ) == E_ACCESSDENIED );
     product.productKind = XStoreProductKind::Durable;
@@ -873,6 +1158,16 @@ static void test_durable_acquisition( void )
     context.store_context = store;
     CHECK( "durable-store-identity", entitled_store_identity( store, &xuid, &context.store_serial ) == S_OK );
     CHECK( "durable-store-live", durable_license_context_valid( &context ) );
+    CHECK( "durable-unlicensed-fixture", package_license_create_unlicensed( threads, &context.license ) == S_OK );
+    {
+        XAsyncProviderData data = {};
+        data.context = &context;
+        data.buffer = &result;
+        data.bufferSize = sizeof( result );
+        CHECK( "durable-unlicensed-result", package_license_provider( XAsyncOp::GetResult, &data ) == S_OK &&
+                                                result && !context.license && !package_license_valid( result ) );
+        package_license_close( result );
+    }
     context.store_serial++;
     CHECK( "durable-wrong-generation", !durable_license_context_valid( &context ) );
     context.store_serial--;
@@ -1726,6 +2021,7 @@ int main( void )
     test_related_hints();
     test_receipts();
     test_async( test_metadata() );
+    test_catalog();
     test_package_licenses();
     test_durable_acquisition();
     test_addon_licenses();

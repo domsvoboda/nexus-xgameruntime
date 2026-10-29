@@ -67,15 +67,15 @@ HRESULT WINAPI XStoreImpl::XStoreQueryProductsAsync( const XStoreContextHandle s
                                                      SIZE_T storeIdsCount, const char **actionFilters,
                                                      SIZE_T actionFiltersCount, XAsyncBlock *async )
 {
-    ( void )0;
-    NEXUS_STORE_META( 33, E_NOTIMPL, 0, NULL );
-    return E_NOTIMPL;
+    HRESULT hr = catalog_begin( storeContextHandle, static_cast<UINT32>( productKinds ), storeIds, storeIdsCount,
+                                actionFilters, actionFiltersCount, async );
+    NEXUS_STORE_META( 33, hr, 0, NULL );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryProductsResult( XAsyncBlock *async, XStoreProductQueryHandle *productQueryHandle )
 {
-    ( void )0;
-    return E_NOTIMPL;
+    return entitled_result( async, productQueryHandle, FALSE );
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryEntitledProductsAsync( const XStoreContextHandle storeContextHandle,

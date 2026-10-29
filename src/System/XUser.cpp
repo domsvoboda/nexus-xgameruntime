@@ -1342,9 +1342,13 @@ HRESULT WINAPI XUser::GetEndpointInfo( const char *url, struct endpoint *info )
         const WCHAR *protocol = WindowsGetStringRawBuffer( impl->endpoints[i].protocol, &protocolLen );
         const WCHAR *host = WindowsGetStringRawBuffer( impl->endpoints[i].host, &hostLen );
         const WCHAR *path = WindowsGetStringRawBuffer( impl->endpoints[i].path, &pathLen );
+        const WCHAR *urlPath = uc.lpszUrlPath;
+        UINT32 urlPathLen = uc.dwUrlPathLength;
         if ( uc.dwSchemeLength != protocolLen || wcsnicmp( uc.lpszScheme, protocol, protocolLen ) ) continue;
-        if ( impl->endpoints[i].path && ( uc.dwUrlPathLength < pathLen || wcsncmp( uc.lpszUrlPath, path, pathLen ) ) )
-            continue;
+        /* Titles may list Path without its leading slash (Solo Leveling: "xbox"). */
+        if ( pathLen && path[0] == '/' ) path++, pathLen--;
+        if ( urlPathLen && urlPath[0] == '/' ) urlPath++, urlPathLen--;
+        if ( impl->endpoints[i].path && ( urlPathLen < pathLen || wcsncmp( urlPath, path, pathLen ) ) ) continue;
         if ( impl->endpoints[i].wildcard )
         {
             if ( !match && match_wildcard( host, hostLen, uc.lpszHostName, uc.dwHostNameLength ) )
