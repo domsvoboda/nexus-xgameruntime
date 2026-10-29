@@ -21,6 +21,7 @@
 
 #include "../../private.h"
 #include "SpinLock.h"
+#include "Atomic64.h"
 
 /*****************************************************************************
  
@@ -259,7 +260,7 @@ private:
 
     struct alignas(8) Node
     {
-        std::atomic<Address> next;
+        nexus::Atomic64<Address> next;
         TData data;
     };
 
@@ -376,8 +377,8 @@ private:
     private:
 
         LocklessQueue& m_owner;
-        std::atomic<Address> m_head;
-        std::atomic<Address> m_tail;
+        nexus::Atomic64<Address> m_head;
+        nexus::Atomic64<Address> m_tail;
         Address m_end;
     };
 

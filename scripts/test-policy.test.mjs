@@ -405,3 +405,15 @@ test('WinRT-dependent privilege validation has a separate matching-engine gate',
     assert.doesNotMatch(read('scripts/test-component.mjs'),/\['nexus_user-privilege',/);
     assert.match(read('src/System/Threading/XAsync.cpp'),/std::atomic<DWORD> signature/);
 });
+test('64-bit atomics use Atomic64 so i386 accesses stay locked under FEX without vector TSO',()=>{
+    const walk=directory=>fs.readdirSync(path.join(root,directory),{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?walk(path.join(directory,entry.name)):[path.join(directory,entry.name)]);
+    for(const name of walk('src').filter(name=>/\.(h|cpp)$/.test(name)))
+        assert.doesNotMatch(read(name),/std::atomic<\s*(u?int64_t|U?INT64|U?LONG64|U?LONGLONG|(unsigned )?long long|Address)\s*>/,name);
+    const header=read('src/System/Threading/Atomic64.h');
+    assert.match(header,/#if defined\(__i386__\)/);
+    assert.match(header,/#else\n\/\/ Other targets keep std::atomic and its codegen unchanged\.\ntemplate<typename T>\nusing Atomic64 = std::atomic<T>;\n#endif/);
+    const i386=header.split('#if defined(__i386__)')[1].split('#else')[0];
+    assert.doesNotMatch(i386,/__atomic_(load|store|exchange|fetch)|std::atomic</);
+    assert.equal(i386.match(/__atomic_compare_exchange_n\(/g).length,4);
+    assert.ok(i386.includes('"nexus-fex-safe-i386-atomics-v1"'));
+});
