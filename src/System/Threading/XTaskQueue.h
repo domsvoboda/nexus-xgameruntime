@@ -27,6 +27,7 @@
 #include "AtomicVector.h"
 #include "WaitTimer.h"
 #include "LocklessQueue.h"
+#include "Atomic64.h"
 
 #include <mutex>
 #include <condition_variable>
@@ -245,7 +246,7 @@ private:
         XTaskQueueMonitorCallback* Callback;
     };
 
-    std::atomic<uint64_t> m_nextToken{ 0 };
+    nexus::Atomic64<uint64_t> m_nextToken{ 0 };
     std::mutex m_lock;
     CallbackRegistration m_buffer1[SUBMIT_CALLBACK_MAX];
     CallbackRegistration m_buffer2[SUBMIT_CALLBACK_MAX];
@@ -275,7 +276,7 @@ private:
         XTaskQueuePort Port;
     };
 
-    std::atomic<uint64_t> m_nextToken{ 0 };
+    nexus::Atomic64<uint64_t> m_nextToken{ 0 };
     StaticArray<WaitRegistration, QUEUE_WAIT_MAX> m_callbacks;
     std::mutex m_lock;
 };
@@ -399,8 +400,8 @@ private:
     std::mutex m_terminationLock;
     OS::WaitTimer m_timer;
     OS::ThreadPool m_threadPool;
-    std::atomic<uint64_t> m_timerDue = { UINT64_MAX };
-    std::atomic<uint64_t> m_nextId = { 0 };
+    nexus::Atomic64<uint64_t> m_timerDue = { UINT64_MAX };
+    nexus::Atomic64<uint64_t> m_nextId = { 0 };
     std::atomic<bool> m_suspended = { false };
     std::atomic<ULONG> m_refs{ 0 };
     std::atomic_flag m_deleting;
