@@ -8,13 +8,17 @@ const buildArg = process.argv[2];
 if (!buildArg || process.argv.length !== 3) throw Error('Usage: test-component.mjs BUILD_DIRECTORY');
 const build = fs.realpathSync(buildArg), bin = path.join(build, 'bin');
 const probes = [
+    ['nexus_legacy-service-client', 70],
+    ['nexus_auth-rejection-metadata', 28],
+    ['nexus_token-endpoint', 36],
     ['nexus_store-context', 61],
+    ['nexus_store-license-map', 90],
     ['nexus_user-device-association',6309], ['nexus_user-audio',334], ['nexus_windows-account-metadata',1713],
     ['nexus_game-relaunch',64], ['nexus_game-relaunch-search', 116], ['nexus_async-provider-contract',116], ['nexus_system_device_id', 332], ['nexus_async-schedule', 16],
     ['nexus_async-completion-lifetime', 2805], ['nexus_taskqueue-teardown', 20],
     ['nexus_taskqueue-close', 1137], ['nexus_taskqueue-contract', 1374],
     ['nexus_package-identity', 15], ['nexus_package-legacy', 139], ['nexus_package-chunks', 312],
-    ['nexus_package-content',332], ['nexus_package-monitors', 362], ['nexus_package-progress-bytes', 115],
+    ['nexus_package-content',332], ['nexus_package-installed',110], ['nexus_package-monitors', 362], ['nexus_package-progress-bytes', 115],
     ['nexus_package-selection', 750],
     ['nexus_gamesave-sync', 283], ['nexus_gamesave-transfer', 263], ['nexus_gamesave-files', 25],
     ['nexus_gamesave-file-paths', 55],
