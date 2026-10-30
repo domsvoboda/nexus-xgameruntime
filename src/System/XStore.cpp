@@ -25,6 +25,7 @@
 #include "XPackage.h"
 #include "../Runtime/Configuration.h"
 #include "Store/Bridge.h"
+#include "GameBridge/Bridge.h"
 #include <mutex>
 
 static const char *GetStoreProductId();

@@ -276,7 +276,7 @@ test('current game licenses require proof-bound genuine SKU and support safe can
     assert.doesNotMatch(source,/4102444800|0010|isActive\s*=\s*TRUE[\s\S]*return E_NOTIMPL/);
     assert.match(read('src/System/Store/Entitled.h').replace(/\s+/g,''),/InterlockedCompareExchange\(&context->terminal,1,0\)/);
     assert.match(read('tests/Nexus/store-entitlements.cpp').replace(/\s+/g,''),/VirtualFree\(block,0,MEM_RELEASE\)/);
-    assert.match(read('scripts/test-store.mjs'),/\['store-entitlements',992\]/);
+    assert.match(read('scripts/test-store.mjs'),/\['store-entitlements',1006\]/);
     assert.match(read('scripts/test-store.mjs'),/realAccounts:false,realCloud:false,fullRuntime:false/);
 });
 
@@ -423,4 +423,15 @@ test('64-bit atomics use Atomic64 so i386 accesses stay locked under FEX without
     assert.doesNotMatch(i386,/__atomic_(load|store|exchange|fetch)|std::atomic</);
     assert.equal(i386.match(/__atomic_compare_exchange_n\(/g).length,4);
     assert.ok(i386.includes('"nexus-fex-safe-i386-atomics-v1"'));
+});
+
+test('Store asks only the game bridge, from the worker, and keeps license checks instant',()=>{
+    const bridge=read('src/System/GameBridge/Bridge.cpp');
+    assert.match(bridge,/"NEXUS_GAME_BRIDGE_PORT"/);
+    assert.match(bridge,/"NEXUS_GAME_BRIDGE_KEY"/);
+    assert.doesNotMatch(bridge,/NEXUS_INVITE_/);
+    const entitled=read('src/System/Store/Entitled.h').replace(/\s+/g,' ');
+    assert.match(entitled,/if \( !context->game && !context->current_only && !InterlockedCompareExchange\( &context->canceled, 0, 0 \) && entitled_ask_related\( nexus::bridge::Get\(\)/);
+    assert.match(entitled,/entitled_merge_hint\( ids, &count, reply\[0\]\.c_str\(\) \)/);
+    assert.doesNotMatch(read('src/System/GameInvite/Bridge.cpp'),/related/);
 });
