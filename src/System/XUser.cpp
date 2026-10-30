@@ -111,6 +111,7 @@ cleanup:
 
 /* Identity metadata is optional and never controls authentication success. */
 #include "User/AccountMetadata.h"
+#include "User/AuthRejectionMetadata.h"
 
 /* Private opt-in diagnostics: numeric metadata only, never credentials or URLs.
  * The caller must pre-create the private file; bounded to 32 KiB. */
@@ -3104,6 +3105,7 @@ static HRESULT xsts_authorize_privilege( XUserHandle user, const char *relyingPa
         goto cleanup;
     if ( status != 200 )
     {
+        auth_rejection_metadata(relyingParty, status, buffer, bufferSize);
         ERR( "xsts authorization failed, status %lu.\n", status );
         hr = E_FAIL;
         goto cleanup;
