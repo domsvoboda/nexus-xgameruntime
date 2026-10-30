@@ -257,9 +257,11 @@ class AppLicenseOperation final : public IAsyncOperation_StoreAppLicense, public
         XStoreGameLicense license;
         ICompletedHandler_ *notify;
 
+        /* A failed query has no license result. Preserve its HRESULT for both
+         * IAsyncInfo and GetResults instead of completing with an inactive license. */
         HRESULT hr = query_game_license( &license, operation->canceled );
-        if ( FAILED( hr ) ) license = {};
-        AppLicense *value = new ( std::nothrow ) AppLicense( license );
+        AppLicense *value = SUCCEEDED( hr ) ? new ( std::nothrow ) AppLicense( license ) : nullptr;
+        if ( SUCCEEDED( hr ) && !value ) hr = E_OUTOFMEMORY;
         AcquireSRWLockExclusive( &operation->lock );
         if ( operation->status != STATUS_STARTED )
         {
@@ -269,8 +271,8 @@ class AppLicenseOperation final : public IAsyncOperation_StoreAppLicense, public
             return 0;
         }
         operation->result = value;
-        operation->error = value ? S_OK : E_OUTOFMEMORY;
-        operation->status = value ? STATUS_COMPLETED : STATUS_ERROR;
+        operation->error = hr;
+        operation->status = SUCCEEDED( hr ) ? STATUS_COMPLETED : STATUS_ERROR;
         const int terminal = operation->status;
         notify = operation->handler;
         if ( notify ) notify->AddRef();
