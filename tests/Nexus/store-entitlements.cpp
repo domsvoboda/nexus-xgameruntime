@@ -10,6 +10,7 @@
 #include "../../src/private.h"
 #include <xstore.h>
 #include <xpackage.h>
+#include "../../src/System/GameBridge/Bridge.h"
 
 const char *storeId = "B00000000001";
 static HANDLE bridge_started, bridge_gate;
@@ -42,6 +43,30 @@ HRESULT xodus_store_license_xml( const char *request, SIZE_T size, char **out )
 static const char *GetStoreProductId()
 {
     return storeId;
+}
+/* A scripted game bridge: no socket, no launcher. Null means "no bridge". */
+class FixtureBridge final : public nexus::bridge::Transport
+{
+public:
+    HRESULT results[8]{};
+    std::string list;
+    unsigned replies = 0, calls = 0;
+    LONG *cancel_after_first = nullptr;
+    std::vector<std::string> last;
+    HRESULT Exchange( const std::vector<std::string> &request, std::vector<std::string> &reply ) noexcept override
+    {
+        last = request;
+        reply.clear();
+        const HRESULT hr = results[std::min( calls, 7u )];
+        if ( ++calls == 1 && cancel_after_first ) InterlockedExchange( cancel_after_first, TRUE );
+        if ( hr == S_OK ) reply.assign( replies, list );
+        return hr;
+    }
+};
+static nexus::bridge::Transport *fixture_bridge;
+nexus::bridge::Transport *nexus::bridge::Get() noexcept
+{
+    return fixture_bridge;
 }
 /* Capture only synthetic public paths and stop before any network send. */
 static WCHAR public_path[256];
@@ -1180,6 +1205,95 @@ static void test_related_hints( void )
                                             count == 256 && !memcmp( ids, before, sizeof( ids ) ) );
 }
 
+static void related_bridge_reset( UINT32 count )
+{
+    entitled_related_count = count;
+    entitled_related_asked = FALSE;
+}
+
+static void test_related_bridge( void )
+{
+    FixtureBridge bridge;
+    LONG canceled = FALSE;
+    char *request = NULL;
+    entitled_bridge_poll_ms = 1;
+    entitled_bridge_wait_ms = 50;
+    strcpy( entitled_related[0], "B00000000009" );
+    related_bridge_reset( 1 );
+    CHECK( "related-bridge-absent", entitled_ask_related( NULL, "US", &canceled ) == S_FALSE &&
+                                        entitled_related_count == 1 && !entitled_related_asked );
+
+    bridge.list = "B00000000002,B00000000009,B00000000003";
+    bridge.replies = 1;
+    CHECK( "related-bridge-merge", entitled_ask_related( &bridge, "GB", &canceled ) == S_OK &&
+                                       entitled_related_count == 3 && !strcmp( entitled_related[0], "B00000000009" ) &&
+                                       !strcmp( entitled_related[1], "B00000000002" ) &&
+                                       !strcmp( entitled_related[2], "B00000000003" ) );
+    CHECK( "related-bridge-request", bridge.last.size() == 3 && bridge.last[0] == "related" &&
+                                         bridge.last[1] == storeId && bridge.last[2] == "GB" );
+    CHECK( "related-bridge-once", entitled_ask_related( &bridge, "GB", &canceled ) == S_FALSE && bridge.calls == 1 );
+    CHECK( "related-bridge-request-xml",
+           entitled_request( 31, "GB", "en-GB", FALSE, &request ) == S_OK && request &&
+               strstr( request, "<ProductId>B00000000002</ProductId>" ) &&
+               strstr( request, "<ProductId>B00000000003</ProductId>" ) );
+    free( request );
+    CHECK( "related-bridge-current-only",
+           entitled_request( 1, "GB", "en-GB", TRUE, &request ) == S_OK && request &&
+               !strstr( request, "<ProductId>" ) );
+    free( request );
+
+    bridge = FixtureBridge();
+    bridge.results[0] = bridge.results[1] = E_PENDING;
+    bridge.list = "B00000000004";
+    bridge.replies = 1;
+    related_bridge_reset( 1 );
+    CHECK( "related-bridge-pending-then-list", entitled_ask_related( &bridge, "US", &canceled ) == S_OK &&
+                                                   bridge.calls == 3 && entitled_related_count == 2 &&
+                                                   !strcmp( entitled_related[1], "B00000000004" ) );
+
+    bridge = FixtureBridge();
+    for ( auto &result : bridge.results ) result = E_PENDING;
+    related_bridge_reset( 1 );
+    CHECK( "related-bridge-timeout",
+           entitled_ask_related( &bridge, "US", &canceled ) == HRESULT_FROM_WIN32( ERROR_TIMEOUT ) &&
+               entitled_related_count == 1 && entitled_related_asked );
+
+    const char *bad[] = { "B00000000002,", "b00000000002", "B00000000002;B00000000003" };
+    for ( const char *list : bad )
+    {
+        bridge = FixtureBridge();
+        bridge.list = list;
+        bridge.replies = 1;
+        related_bridge_reset( 1 );
+        CHECK( "related-bridge-invalid-ignored", entitled_ask_related( &bridge, "US", &canceled ) == E_UNEXPECTED &&
+                                                     entitled_related_count == 1 && entitled_related_asked );
+    }
+    bridge = FixtureBridge();
+    bridge.list = "B00000000002";
+    bridge.replies = 2;
+    related_bridge_reset( 1 );
+    CHECK( "related-bridge-extra-strings-ignored",
+           entitled_ask_related( &bridge, "US", &canceled ) == E_UNEXPECTED && entitled_related_count == 1 );
+
+    bridge = FixtureBridge();
+    bridge.results[0] = E_NOTIMPL;
+    related_bridge_reset( 1 );
+    CHECK( "related-bridge-unknown-verb", entitled_ask_related( &bridge, "US", &canceled ) == E_NOTIMPL &&
+                                              entitled_related_count == 1 && entitled_related_asked );
+
+    bridge = FixtureBridge();
+    for ( auto &result : bridge.results ) result = E_PENDING;
+    bridge.cancel_after_first = &canceled;
+    related_bridge_reset( 1 );
+    CHECK( "related-bridge-cancel", entitled_ask_related( &bridge, "US", &canceled ) == E_ABORT &&
+                                        bridge.calls == 1 && entitled_related_count == 1 && !entitled_related_asked );
+    canceled = FALSE;
+
+    related_bridge_reset( 0 );
+    entitled_bridge_poll_ms = 250;
+    entitled_bridge_wait_ms = 20000;
+}
+
 struct game_test_context
 {
     XStoreContextHandle store;
@@ -1798,6 +1912,7 @@ int main( void )
     bridge_gate = CreateEventA( NULL, TRUE, FALSE, NULL );
     test_current_game_license();
     test_related_hints();
+    test_related_bridge();
     test_receipts();
     test_async( test_metadata() );
     test_package_licenses();

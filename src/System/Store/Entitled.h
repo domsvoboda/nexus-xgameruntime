@@ -60,6 +60,70 @@ static BOOL entitled_merge_hint( char ids[256][13], UINT32 *count, const char *h
     return TRUE;
 }
 
+/* The game bridge (the service that launched the game) discovers the account's
+ * owned add-ons when the game first asks, so the launch does not wait for it.
+ * Its reply is one more discovery hint: same validation, same receipt proof.
+ * Asked once per process; E_ABORT leaves it to the next query, while a timeout,
+ * E_NOTIMPL or an invalid list keeps the package and launch-hint list. */
+static SRWLOCK entitled_related_lock = SRWLOCK_INIT;
+static BOOL entitled_related_asked;
+static DWORD entitled_bridge_poll_ms = 250, entitled_bridge_wait_ms = 20000;
+
+static HRESULT entitled_ask_related( nexus::bridge::Transport *bridge, const char *market, LONG *canceled )
+{
+    char ids[256][13];
+    UINT32 count;
+    ULONGLONG deadline;
+    HRESULT hr;
+    if ( !bridge || !entitled_id( GetStoreProductId() ) ) return S_FALSE;
+    AcquireSRWLockExclusive( &entitled_related_lock );
+    if ( entitled_related_asked )
+    {
+        ReleaseSRWLockExclusive( &entitled_related_lock );
+        return S_FALSE;
+    }
+    try
+    {
+        const std::vector<std::string> request{ "related", GetStoreProductId(), market };
+        std::vector<std::string> reply;
+        deadline = GetTickCount64() + entitled_bridge_wait_ms;
+        while ( ( hr = bridge->Exchange( request, reply ) ) == E_PENDING )
+        {
+            if ( GetTickCount64() >= deadline )
+            {
+                hr = HRESULT_FROM_WIN32( ERROR_TIMEOUT );
+                break;
+            }
+            Sleep( entitled_bridge_poll_ms );
+            if ( InterlockedCompareExchange( canceled, 0, 0 ) )
+            {
+                ReleaseSRWLockExclusive( &entitled_related_lock );
+                return E_ABORT;
+            }
+        }
+        count = entitled_related_count;
+        memcpy( ids, entitled_related, count * 13 );
+        if ( SUCCEEDED( hr ) && ( reply.size() != 1 || !entitled_merge_hint( ids, &count, reply[0].c_str() ) ) )
+            hr = E_UNEXPECTED;
+        if ( SUCCEEDED( hr ) && count > entitled_related_count )
+        {
+            /* Merging keeps the existing prefix, so lock-free readers see a
+             * consistent list: the new tail is written before the count. */
+            memcpy( entitled_related[entitled_related_count], ids[entitled_related_count],
+                    ( count - entitled_related_count ) * 13 );
+            MemoryBarrier();
+            entitled_related_count = count;
+        }
+    }
+    catch ( ... )
+    {
+        hr = E_OUTOFMEMORY;
+    }
+    entitled_related_asked = TRUE;
+    ReleaseSRWLockExclusive( &entitled_related_lock );
+    return hr;
+}
+
 struct game_license_sku
 {
     char id[5];
@@ -441,9 +505,11 @@ struct entitled_async
     LONG refs, canceled, started, terminal;
     LONG begin_active;
     DWORD begin_thread;
-    BOOL game;
+    BOOL game, current_only;
     XStoreContextHandle store;
     UINT64 store_serial, refresh;
+    UINT32 kinds;
+    char market[16], language[128];
     char *request;
     UINT32 page_size;
     struct entitled_page *page;
@@ -473,11 +539,58 @@ static void entitled_complete( entitled_async *context, XAsyncBlock *async, HRES
     if ( !InterlockedCompareExchange( &context->terminal, 1, 0 ) )
         context->threading->XAsyncComplete( async, hr, size );
 }
+static HRESULT entitled_request( UINT32 kinds, const char *market, const char *language, BOOL current_only,
+                                 char **out )
+{
+    xmlDocPtr doc;
+    xmlNodePtr root;
+    xmlChar *bytes = NULL;
+    char kind[16];
+    UINT32 i;
+    int size;
+    *out = NULL;
+    if ( !( doc = xmlNewDoc( BAD_CAST "1.0" ) ) ) return E_OUTOFMEMORY;
+    if ( !( root = xmlNewNode( NULL, BAD_CAST "Request" ) ) )
+    {
+        xmlFreeDoc( doc );
+        return E_OUTOFMEMORY;
+    }
+    xmlDocSetRootElement( doc, root );
+    snprintf( kind, sizeof( kind ), "%u", kinds );
+    xmlNewTextChild( root, NULL, BAD_CAST "ParentProductId", BAD_CAST GetStoreProductId() );
+    for ( i = 0; !current_only && i < entitled_related_count; i++ )
+        if ( strcmp( GetStoreProductId(), entitled_related[i] ) )
+            xmlNewTextChild( root, NULL, BAD_CAST "ProductId", BAD_CAST entitled_related[i] );
+    xmlNewTextChild( root, NULL, BAD_CAST "ProductKinds", BAD_CAST kind );
+    xmlNewTextChild( root, NULL, BAD_CAST "Market", BAD_CAST market );
+    xmlNewTextChild( root, NULL, BAD_CAST "Language", BAD_CAST language );
+    xmlDocDumpMemory( doc, &bytes, &size );
+    xmlFreeDoc( doc );
+    if ( !bytes ) return E_OUTOFMEMORY;
+    if ( size <= 0 || size > 60000 )
+    {
+        xmlFree( bytes );
+        return E_INVALIDARG;
+    }
+    *out = strdup( ( char * )bytes );
+    xmlFree( bytes );
+    return *out ? S_OK : E_OUTOFMEMORY;
+}
+
 static DWORD WINAPI entitled_worker( void *arg )
 {
     entitled_async *context = static_cast<entitled_async *>( arg );
     struct entitled_snapshot *snapshot = NULL;
+    char *request;
     HRESULT hr = E_ABORT;
+    /* License checks stay instant: only add-on product queries wait for discovery. */
+    if ( !context->game && !context->current_only && !InterlockedCompareExchange( &context->canceled, 0, 0 ) &&
+         entitled_ask_related( nexus::bridge::Get(), context->market, &context->canceled ) == S_OK &&
+         SUCCEEDED( entitled_request( context->kinds, context->market, context->language, FALSE, &request ) ) )
+    {
+        free( context->request );
+        context->request = request;
+    }
     if ( !InterlockedCompareExchange( &context->canceled, 0, 0 ) )
         hr = entitled_fetch( context->request, &context->canceled, &snapshot );
     if ( SUCCEEDED( hr ) )
@@ -613,14 +726,9 @@ static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 p
                                BOOL game = FALSE, BOOL current_only = FALSE )
 {
     struct entitled_async *context;
-    xmlDocPtr doc;
-    xmlNodePtr root;
-    xmlChar *bytes = NULL;
-    char kind[16], language[128] = "en-US", market[16] = "US";
+    char *request, language[128] = "en-US", market[16] = "US";
     WCHAR locale[85], country[16];
     UINT64 xuid, serial;
-    UINT32 i;
-    int size;
     HRESULT hr;
     if ( !async || !kinds || ( kinds & ~31 ) || !page_size ) return E_INVALIDARG;
     page_size = std::min<UINT32>( page_size, ENTITLED_MAX_PRODUCTS );
@@ -630,45 +738,21 @@ static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 p
         WideCharToMultiByte( CP_UTF8, 0, locale, -1, language, sizeof( language ), NULL, NULL );
     if ( GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, country, ARRAY_SIZE( country ) ) )
         WideCharToMultiByte( CP_UTF8, 0, country, -1, market, sizeof( market ), NULL, NULL );
-    if ( !( doc = xmlNewDoc( BAD_CAST "1.0" ) ) ) return E_OUTOFMEMORY;
-    if ( !( root = xmlNewNode( NULL, BAD_CAST "Request" ) ) )
+    if ( FAILED( hr = entitled_request( kinds, market, language, current_only, &request ) ) ) return hr;
+    if ( !( context = static_cast<std::remove_reference_t<decltype( context )>>( calloc( 1, sizeof( *context ) ) ) ) )
     {
-        xmlFreeDoc( doc );
+        free( request );
         return E_OUTOFMEMORY;
     }
-    xmlDocSetRootElement( doc, root );
-    snprintf( kind, sizeof( kind ), "%u", kinds );
-    xmlNewTextChild( root, NULL, BAD_CAST "ParentProductId", BAD_CAST GetStoreProductId() );
-    for ( i = 0; !current_only && i < entitled_related_count; i++ )
-        if ( strcmp( GetStoreProductId(), entitled_related[i] ) )
-            xmlNewTextChild( root, NULL, BAD_CAST "ProductId", BAD_CAST entitled_related[i] );
-    xmlNewTextChild( root, NULL, BAD_CAST "ProductKinds", BAD_CAST kind );
-    xmlNewTextChild( root, NULL, BAD_CAST "Market", BAD_CAST market );
-    xmlNewTextChild( root, NULL, BAD_CAST "Language", BAD_CAST language );
-    xmlDocDumpMemory( doc, &bytes, &size );
-    xmlFreeDoc( doc );
-    if ( !bytes ) return E_OUTOFMEMORY;
-    if ( size <= 0 || size > 60000 )
-    {
-        xmlFree( bytes );
-        return E_INVALIDARG;
-    }
-    context = static_cast<std::remove_reference_t<decltype( context )>>( calloc( 1, sizeof( *context ) ) );
-    if ( context )
-    {
-        context->request = strdup( ( char * )bytes );
-        context->page_size = page_size;
-    }
-    xmlFree( bytes );
-    if ( !context ) return E_OUTOFMEMORY;
-    if ( !context->request )
-    {
-        free( context );
-        return E_OUTOFMEMORY;
-    }
+    context->request = request;
+    context->page_size = page_size;
+    context->kinds = kinds;
+    memcpy( context->market, market, sizeof( market ) );
+    memcpy( context->language, language, sizeof( language ) );
     context->store_serial = serial;
     context->store = store;
     context->game = game;
+    context->current_only = current_only;
     context->refresh = InterlockedIncrement64( &entitled_next_refresh );
     return entitled_start( context, async, FALSE );
 }
