@@ -200,7 +200,22 @@ HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForPackageResult(
 
 HRESULT WINAPI XStoreImpl::XStoreQueryGameLicenseAsync( const XStoreContextHandle store, XAsyncBlock *async )
 {
-    return entitled_begin( store, static_cast<UINT32>( XStoreProductKind::Game ), ENTITLED_MAX_PRODUCTS, async, TRUE );
+    HRESULT hr = entitled_begin( store, static_cast<UINT32>( XStoreProductKind::Game ), ENTITLED_MAX_PRODUCTS, async, TRUE );
+    const char *product = GetStoreProductId();
+    if ( SUCCEEDED( hr ) && product && !strcmp( product, "9N1HF804QXN4" ) && async->callback )
+    {
+        // Age III releases the context and async block as soon as this call
+        // returns. Wait for its callback to consume the verified license first.
+        // TODO: Bound this wait and handle manually dispatched completion queues.
+        IXThreadingImpl *threading = nullptr;
+        if ( SUCCEEDED( QueryApiImpl( CLSID_XThreadingImpl, __uuidof( IXThreadingImpl ),
+                                     reinterpret_cast<void **>( &threading ) ) ) )
+        {
+            threading->XAsyncGetStatus( async, TRUE );
+            threading->Release();
+        }
+    }
+    return hr;
 }
 HRESULT WINAPI XStoreImpl::XStoreQueryGameLicenseResult( XAsyncBlock *async, XStoreGameLicense *license )
 {
