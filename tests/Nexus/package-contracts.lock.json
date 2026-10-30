@@ -6,5 +6,11 @@
     "package-chunks-probe.c": "3d2fc0a9697f95891eb022c92dc179fe8506e12bf71097028c518ec1e8da2ba0",
     "package-monitors-probe.c": "892f87c5cf686e079bb1890b2f03d8e203e2d0f402631e27e8c5e23a4231ae6f",
     "package-progress-bytes-probe.c": "b61e784decd05e8f83f6107e9c444f074af68b90ce33af2940f77f9f1efa223e"
+  },
+  "reviewedProbeUpdates": {
+    "package-legacy-probe.c": {
+      "sha256": "12a9a7e5b7803a1c4353b3fa1efd4ee361a109e2e9a582ad3de0feb5c68991c1",
+      "reason": "Installed-content callbacks are supported: check all inherited slots, unregister, no replay and invalid inputs instead of the obsolete E_NOTIMPL expectation."
+    }
   }
 }
