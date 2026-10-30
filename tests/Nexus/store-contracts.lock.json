@@ -323,6 +323,7 @@
       "public-catalog-language-request-captured",
       "public-catalog-language-path-exact",
       "winrt-durable-projection",
+      "winrt-trial-projection",
       "winrt-packaged-durable-included",
       "winrt-consumable-excluded",
       "winrt-unowned-excluded",

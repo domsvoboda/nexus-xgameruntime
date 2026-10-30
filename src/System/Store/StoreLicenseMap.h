@@ -50,15 +50,89 @@ static HRESULT license_string(const std::string &text, HSTRING *out)
     if (!out)
         return E_POINTER;
     *out = nullptr;
-    if (text.size() > 4096)
+    if (text.size() > 32768)
         return E_INVALIDARG;
-    WCHAR wide[4097];
-    int count =
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), text.size(), wide, ARRAY_SIZE(wide));
-    if (!count && !text.empty())
+    if (text.empty())
+        return WindowsCreateString(nullptr, 0, out);
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), text.size(), nullptr, 0);
+    if (!count)
         return HRESULT_FROM_WIN32(ERROR_NO_UNICODE_TRANSLATION);
-    return WindowsCreateString(wide, count, out);
+    try
+    {
+        std::vector<WCHAR> wide(count);
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), text.size(), wide.data(), count) !=
+            count)
+            return HRESULT_FROM_WIN32(ERROR_NO_UNICODE_TRANSLATION);
+        return WindowsCreateString(wide.data(), count, out);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return E_OUTOFMEMORY;
+    }
 }
+
+static std::string license_json_string(const std::string &text)
+{
+    static const char hex[] = "0123456789abcdef";
+    std::string out = "\"";
+    for (unsigned char c : text)
+    {
+        if (c == '"' || c == '\\')
+        {
+            out += '\\';
+            out += static_cast<char>(c);
+        }
+        else if (c < 0x20)
+        {
+            out += "\\u00";
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+        else
+            out += static_cast<char>(c);
+    }
+    out += '"';
+    return out;
+}
+
+/* Microsoft StoreLicense.ExtendedJsonData is the productAddOns object in
+ * https://learn.microsoft.com/windows/uwp/monetize/data-schemas-for-store-products
+ * All seven fields project this same verified durable SKU, never catalog-only
+ * ownership, an opaque account receipt, or a longer lifetime than its proof. */
+static HRESULT license_json(const AddonLicenseData &value, HSTRING *out)
+{
+    if (!out)
+        return E_POINTER;
+    *out = nullptr;
+    if (value.expiration <= std::time(nullptr))
+        return E_ACCESSDENIED;
+    if (value.expiration > 253402300799LL)
+        return E_INVALIDARG; /* Four-digit UTC year. */
+    ULARGE_INTEGER ticks;
+    ticks.QuadPart = (value.expiration + 11644473600LL) * 10000000ULL;
+    FILETIME ft = {ticks.LowPart, ticks.HighPart};
+    SYSTEMTIME time;
+    if (!FileTimeToSystemTime(&ft, &time))
+        return HRESULT_FROM_WIN32(GetLastError());
+    char date[32];
+    std::snprintf(date, sizeof(date), "%04u-%02u-%02u %02u:%02u:%02u", (unsigned)time.wYear, (unsigned)time.wMonth,
+                  (unsigned)time.wDay, (unsigned)time.wHour, (unsigned)time.wMinute, (unsigned)time.wSecond);
+    try
+    {
+        const std::string json =
+            "{\"productId\":" + license_json_string(value.sku.substr(0, 12)) +
+            ",\"skuId\":" + license_json_string(value.sku.substr(13, 4)) +
+            ",\"productType\":\"Durable\",\"skuType\":" + license_json_string(value.trial ? "Trial" : "Full") +
+            ",\"inAppOfferToken\":" + license_json_string(value.offer) +
+            ",\"expiration\":" + license_json_string(date) + ",\"isActive\":true}";
+        return license_string(json, out);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return E_OUTOFMEMORY;
+    }
+}
+
 #define LICENSE_OBJECT_METHODS(type, iid, runtime_name)                                                           \
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override                                      \
     {                                                                                                             \
@@ -123,7 +197,9 @@ class AddonLicense final : public IAddonLicense
         if (!v)
             return E_POINTER;
         *v = nullptr;
-        return E_NOTIMPL;
+        if (!snapshot->valid())
+            return E_ACCESSDENIED;
+        return license_json(snapshot->licenses[index], v);
     }
     HRESULT STDMETHODCALLTYPE Offer(HSTRING *v) override
     {

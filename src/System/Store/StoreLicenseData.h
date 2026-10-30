@@ -9,6 +9,7 @@ struct AddonLicenseData
 {
     std::string sku, offer;
     INT64 expiration;
+    bool trial = false;
 };
 struct AddonLicenseSnapshot
 {

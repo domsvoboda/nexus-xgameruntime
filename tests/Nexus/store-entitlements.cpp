@@ -973,6 +973,9 @@ static void test_addon_licenses( void )
     CHECK("winrt-durable-projection", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK &&
           projected.licenses.size()==1 && projected.licenses[0].sku=="B00000000002/0010" &&
           projected.licenses[0].offer=="bonus" && projected.licenses[0].expiration==(INT64)proof.proof_until);
+    skus[1].isTrial=TRUE;
+    CHECK("winrt-trial-projection", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.size()==1 && projected.licenses[0].trial);
+    skus[1].isTrial=FALSE;
     products[1].hasDigitalDownload=TRUE;
     CHECK("winrt-packaged-durable-included", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.size()==1);
     products[1].hasDigitalDownload=FALSE;

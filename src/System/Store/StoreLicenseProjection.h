@@ -41,6 +41,7 @@ static HRESULT addon_data_from_verified_snapshot(const entitled_snapshot *snapsh
                 AddonLicenseData value;
                 value.sku = std::string(product.storeId) + "/" + sku.skuId;
                 value.offer = product.inAppOfferToken;
+                value.trial = sku.isTrial;
                 value.expiration = std::min<INT64>(snapshot->proof_until, sku.collectionData.endDate);
                 result.licenses.push_back(std::move(value));
             }

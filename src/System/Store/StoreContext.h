@@ -10,6 +10,7 @@
 #include <winstring.h>
 #include <atomic>
 #include <ctime>
+#include <cstdio>
 #include <new>
 #include <memory>
 #include <vector>

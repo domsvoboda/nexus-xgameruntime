@@ -47,8 +47,119 @@ static bool text(HSTRING s, const WCHAR *expected)
     const WCHAR *p = WindowsGetStringRawBuffer(s, &n);
     return n == wcslen(expected) && !wmemcmp(p, expected, n);
 }
+static IJsonObject *parse_json(HSTRING input)
+{
+    HSTRING name = nullptr;
+    IJsonValueStatics *factory = nullptr;
+    IJsonValue *value = nullptr;
+    IJsonObject *object = nullptr;
+    HRESULT hr = WindowsCreateString(RuntimeClass_Windows_Data_Json_JsonValue,
+                                     wcslen(RuntimeClass_Windows_Data_Json_JsonValue), &name);
+    if (SUCCEEDED(hr))
+        hr = RoGetActivationFactory(name, __uuidof(IJsonValueStatics), (void **)&factory);
+    if (SUCCEEDED(hr))
+        hr = factory->Parse(input, &value);
+    if (SUCCEEDED(hr))
+        hr = value->GetObject(&object);
+    CHECK(SUCCEEDED(hr) && object);
+    if (value)
+        value->Release();
+    if (factory)
+        factory->Release();
+    WindowsDeleteString(name);
+    return object;
+}
+static bool json_text(IJsonObject *object, const WCHAR *field, const std::wstring &expected)
+{
+    HSTRING key = nullptr, value = nullptr;
+    HRESULT hr = WindowsCreateString(field, wcslen(field), &key);
+    if (SUCCEEDED(hr))
+        hr = object->GetNamedString(key, &value);
+    UINT32 length = 0;
+    const WCHAR *raw = WindowsGetStringRawBuffer(value, &length);
+    bool match = SUCCEEDED(hr) && length == expected.size() && !wmemcmp(raw, expected.data(), length);
+    WindowsDeleteString(key);
+    WindowsDeleteString(value);
+    return match;
+}
+static void json_checks()
+{
+    auto shared = std::make_shared<AddonLicenseSnapshot>(fixture());
+    // Native WinRT parser validates independent JSON syntax and string round-trip.
+    shared->licenses[0].offer =
+        std::string("quote\" slash\\ line\n tab\t control\1 nul") + std::string(1, '\0') + "\xc5\xbe";
+    const std::string &offer = shared->licenses[0].offer;
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, offer.data(), offer.size(), nullptr, 0);
+    std::wstring expected(count, L' ');
+    CHECK(count > 0 && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, offer.data(), offer.size(),
+                                           expected.data(), count) == count);
+    IAddonLicense *license = new AddonLicense(shared, 0);
+    CHECK(license->Json(nullptr) == E_POINTER);
+    HSTRING json = nullptr;
+    CHECK(license->Json(&json) == S_OK && json);
+    IJsonObject *object = parse_json(json);
+    if (object)
+    {
+        CHECK(json_text(object, L"productId", L"B00000000001"));
+        CHECK(json_text(object, L"skuId", L"0001"));
+        CHECK(json_text(object, L"productType", L"Durable"));
+        CHECK(json_text(object, L"skuType", L"Full"));
+        CHECK(json_text(object, L"inAppOfferToken", expected));
+        HSTRING key = nullptr;
+        boolean active = false;
+        WindowsCreateString(L"isActive", 8, &key);
+        CHECK(object->GetNamedBoolean(key, &active) == S_OK && active);
+        WindowsDeleteString(key);
+        INT64 expiration = 0;
+        CHECK(license->Expiration(&expiration) == S_OK);
+        ULARGE_INTEGER ticks;
+        ticks.QuadPart = expiration;
+        FILETIME ft = {ticks.LowPart, ticks.HighPart};
+        SYSTEMTIME date = {};
+        CHECK(FileTimeToSystemTime(&ft, &date));
+        WCHAR formatted[32];
+        swprintf(formatted, 32, L"%04u-%02u-%02u %02u:%02u:%02u", (unsigned)date.wYear, (unsigned)date.wMonth,
+                 (unsigned)date.wDay, (unsigned)date.wHour, (unsigned)date.wMinute, (unsigned)date.wSecond);
+        CHECK(json_text(object, L"expiration", formatted));
+        object->Release();
+    }
+    WindowsDeleteString(json);
+    shared->licenses[0].trial = true;
+    CHECK(license->Json(&json) == S_OK && json);
+    object = parse_json(json);
+    if (object)
+    {
+        CHECK(json_text(object, L"skuType", L"Trial"));
+        object->Release();
+    }
+    WindowsDeleteString(json);
+    shared->licenses[0].offer = std::string(4096, '\1');
+    CHECK(license->Json(&json) == S_OK && WindowsGetStringLen(json) > 24000);
+    object = parse_json(json);
+    if (object)
+    {
+        CHECK(json_text(object, L"inAppOfferToken", std::wstring(4096, L'\1')));
+        object->Release();
+    }
+    WindowsDeleteString(json);
+    shared->licenses[0].offer = "\xc0\xaf"; // Invalid overlong UTF-8 must not silently change.
+    json = (HSTRING)1;
+    CHECK(license->Json(&json) == HRESULT_FROM_WIN32(ERROR_NO_UNICODE_TRANSLATION) && !json);
+    shared->licenses[0].offer = "first";
+    auto expiry = shared->licenses[0].expiration;
+    shared->licenses[0].expiration = 253402300800LL;
+    CHECK(license->Json(&json) == E_INVALIDARG && !json);
+    shared->licenses[0].expiration = std::time(nullptr) - 1;
+    CHECK(license->Json(&json) == E_ACCESSDENIED && !json);
+    shared->licenses[0].expiration = expiry;
+    shared->proof_until = std::time(nullptr) - 1;
+    CHECK(license->Json(&json) == E_ACCESSDENIED && !json);
+    license->Release();
+}
 int main()
 {
+    CHECK(SUCCEEDED(RoInitialize(RO_INIT_MULTITHREADED)));
+    json_checks();
     CHECK(make_addon_license_map(fixture(), nullptr) == E_POINTER);
     IInspectable *raw = nullptr;
     CHECK(make_addon_license_map(fixture(), &raw) == S_OK && raw);
@@ -89,7 +200,8 @@ int main()
     CHECK(license->Expiration(nullptr) == E_POINTER);
     CHECK(license->Active(nullptr) == E_POINTER);
     key = (HSTRING)1;
-    CHECK(license->Json(&key) == E_NOTIMPL && !key);
+    CHECK(license->Json(&key) == S_OK && key);
+    WindowsDeleteString(key);
     license->Release();
     CHECK(map->HasKey(nullptr, &present) == S_OK && !present);
     license = (IAddonLicense *)1;
@@ -184,6 +296,7 @@ int main()
     shared->proof_until = std::time(nullptr) - 1;
     CHECK(it->HasCurrent(&present) == E_ACCESSDENIED && !present);
     it->Release();
+    RoUninitialize();
     printf("%u checks %u failures\n", checks, failures);
     return failures ? 1 : 0;
 }
