@@ -454,6 +454,7 @@ static const char entitled_game_identity{};
 static LONG entitled_worker_count;
 
 #include "Receipts.h"
+#include "BoundedFetch.h"
 #include "GameLicenseEvents.h"
 #include "GameLicense.h"
 
@@ -591,8 +592,24 @@ static HRESULT entitled_start( struct entitled_async *context, XAsyncBlock *asyn
     return hr;
 }
 
+constexpr DWORD ENTITLED_PREFETCH_TIMEOUT_MS = 15000;
+
+static HRESULT WINAPI entitled_prefetch_worker( void *request, LONG *canceled, void **result )
+{
+    entitled_snapshot *snapshot = nullptr;
+    HRESULT hr = entitled_fetch( static_cast<const char *>( request ), canceled, &snapshot );
+    *result = snapshot;
+    return hr;
+}
+static void entitled_prefetch_free_request( void *request ) { free( request ); }
+static void entitled_prefetch_free_result( void *result )
+{
+    entitled_snapshot_release( static_cast<entitled_snapshot *>( result ) );
+}
+
 static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 page_size, XAsyncBlock *async,
-                               BOOL game = FALSE, BOOL current_only = FALSE )
+                               BOOL game = FALSE, BOOL current_only = FALSE, BOOL prefetch_inline = FALSE,
+                               DWORD prefetch_timeout = ENTITLED_PREFETCH_TIMEOUT_MS )
 {
     struct entitled_async *context;
     xmlDocPtr doc;
@@ -652,6 +669,30 @@ static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 p
     context->store = store;
     context->game = game;
     context->refresh = InterlockedIncrement64( &entitled_next_refresh );
+    if ( prefetch_inline )
+    {
+        char *request = strdup( context->request );
+        if ( !request ) { free( context->request ); free( context ); return E_OUTOFMEMORY; }
+        void *result = nullptr;
+        hr = nexus_bounded_fetch( request, entitled_prefetch_worker, entitled_prefetch_free_request,
+                                  entitled_prefetch_free_result, prefetch_timeout, &result );
+        if ( FAILED( hr ) || !result )
+        {
+            if ( result ) entitled_prefetch_free_result( result );
+            free( context->request ); free( context );
+            return FAILED( hr ) ? hr : E_UNEXPECTED;
+        }
+        context->page = static_cast<entitled_page *>( calloc( 1, sizeof( *context->page ) ) );
+        if ( !context->page )
+        {
+            entitled_prefetch_free_result( result ); free( context->request ); free( context );
+            return E_OUTOFMEMORY;
+        }
+        context->page->refs = 1;
+        context->page->snapshot = static_cast<entitled_snapshot *>( result );
+        context->page->size = page_size;
+        game_license_observe( context->store_serial, context->refresh, context->page->snapshot );
+    }
     return entitled_start( context, async, FALSE );
 }
 

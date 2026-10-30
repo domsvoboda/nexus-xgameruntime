@@ -1814,6 +1814,22 @@ HRESULT XTaskQueueGetPort(
     return S_OK;
 }
 
+// Only the in-tree TaskQueuePortImpl implements ITaskQueuePort. Both ports
+// must dispatch inline; a manual or serialized queue must keep normal async semantics.
+bool nexus::queue_dispatches_inline( XTaskQueueHandle handle ) noexcept
+{
+    referenced_ptr<ITaskQueue> queue(GetQueue(handle));
+    if (!queue) return false;
+    for (auto port : {XTaskQueuePort::Work, XTaskQueuePort::Completion})
+    {
+        referenced_ptr<ITaskQueuePortContext> context;
+        if (FAILED(queue->GetPortContext(port, context.address_of()))) return false;
+        const auto *impl = static_cast<TaskQueuePortImpl *>(context->GetPort());
+        if (!impl || impl->DispatchMode() != XTaskQueueDispatchMode::Immediate) return false;
+    }
+    return true;
+}
+
 HRESULT XTaskQueueCreateComposite(
     XTaskQueuePortHandle workPort,
     XTaskQueuePortHandle completionPort,

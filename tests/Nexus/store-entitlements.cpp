@@ -1575,6 +1575,117 @@ static void test_current_game_result_lifetime()
     entitled_store_close( other );
 }
 
+struct inline_license_result { IXThreadingImpl *threads; LONG calls; HRESULT hr; BOOL active; };
+static void WINAPI inline_license_free_callback( XAsyncBlock *block )
+{
+    auto *result = static_cast<inline_license_result *>( block->context );
+    XStoreGameLicense license{};
+    result->hr = result->threads->XAsyncGetResult( block, &entitled_game_identity, sizeof( license ), &license, nullptr );
+    result->active = license.isActive;
+    ++result->calls;
+    CHECK( "inline-license-callback-frees-user-block", VirtualFree( block, 0, MEM_RELEASE ) );
+}
+static void test_inline_license_lifetime()
+{
+    IXThreadingImpl *threads = nullptr;
+    XTaskQueueHandle queue = nullptr;
+    XStoreContextHandle store = nullptr;
+    UINT64 xuid = 0, serial = 0;
+    CHECK( "inline-license-threading", FixtureQueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl,
+                                                            reinterpret_cast<void **>( &threads ) ) == S_OK && threads );
+    if ( !threads ) return;
+    CHECK( "inline-license-queue", threads->XTaskQueueCreate( XTaskQueueDispatchMode::Immediate,
+                                                              XTaskQueueDispatchMode::Immediate, &queue ) == S_OK );
+    CHECK( "inline-license-store", entitled_store_create( nullptr, &store ) == S_OK );
+    CHECK( "inline-license-identity", entitled_store_identity( store, &xuid, &serial ) == S_OK );
+    auto *block = static_cast<XAsyncBlock *>( VirtualAlloc( nullptr, sizeof( XAsyncBlock ), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE ) );
+    auto *context = static_cast<entitled_async *>( calloc( 1, sizeof( entitled_async ) ) );
+    auto *page = static_cast<entitled_page *>( calloc( 1, sizeof( entitled_page ) ) );
+    auto *snapshot = static_cast<entitled_snapshot *>( calloc( 1, sizeof( entitled_snapshot ) ) );
+    auto *products = static_cast<XStoreProduct *>( calloc( 1, sizeof( XStoreProduct ) ) );
+    auto *sku = static_cast<XStoreSku *>( calloc( 1, sizeof( XStoreSku ) ) );
+    CHECK( "inline-license-allocations", block && context && page && snapshot && products && sku );
+    if ( !block || !context || !page || !snapshot || !products || !sku ) return;
+    sku->skuId = strdup( "0010" ); sku->isInUserCollection = TRUE; sku->collectionData.endDate = time( nullptr ) + 600;
+    products->storeId = strdup( storeId ); products->productKind = XStoreProductKind::Game;
+    products->isInUserCollection = TRUE; products->skus = sku; products->skusCount = 1;
+    snapshot->refs = 1; snapshot->products = products; snapshot->count = 1;
+    snapshot->valid_until = time( nullptr ) + 500; snapshot->proof_until = time( nullptr ) + 500;
+    page->refs = 1; page->snapshot = snapshot; page->size = 1;
+    context->request = strdup( "synthetic" ); context->game = TRUE; context->store = store;
+    context->store_serial = serial; context->page = page;
+    inline_license_result result{ threads, 0, E_FAIL, FALSE };
+    block->queue = queue; block->context = &result; block->callback = inline_license_free_callback;
+    CHECK( "inline-license-begin", entitled_start( context, block, FALSE ) == S_OK );
+    CHECK( "inline-license-callback-before-return", result.calls == 1 && result.hr == S_OK && result.active );
+    entitled_store_close( store );
+    threads->XTaskQueueCloseHandle( queue );
+    threads->Release();
+}
+
+static void test_prefetch_timeout_does_not_touch_released_block()
+{
+    IXThreadingImpl *threads = nullptr;
+    XTaskQueueHandle queue = nullptr;
+    XStoreContextHandle store = nullptr;
+    CHECK( "prefetch-timeout-threading", FixtureQueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl,
+                                                              reinterpret_cast<void **>( &threads ) ) == S_OK && threads );
+    if ( !threads ) return;
+    CHECK( "prefetch-timeout-queue", threads->XTaskQueueCreate( XTaskQueueDispatchMode::Immediate,
+                                                                XTaskQueueDispatchMode::Immediate, &queue ) == S_OK );
+    CHECK( "prefetch-timeout-store", entitled_store_create( nullptr, &store ) == S_OK );
+    auto *block = static_cast<XAsyncBlock *>( VirtualAlloc( nullptr, sizeof( XAsyncBlock ), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE ) );
+    CHECK( "prefetch-timeout-block", block != nullptr );
+    if ( block )
+    {
+        LONG completions = 0;
+        block->queue = queue; block->context = &completions; block->callback = store_lifetime_completion;
+        ResetEvent( bridge_started ); ResetEvent( bridge_gate ); bridge_timeout = 30000;
+        const ULONGLONG start = GetTickCount64();
+        HRESULT hr = entitled_begin( store, 31, 10, block, TRUE, FALSE, TRUE, 100 );
+        CHECK( "prefetch-timeout-reports-timeout", hr == HRESULT_FROM_WIN32( ERROR_TIMEOUT ) );
+        CHECK( "prefetch-timeout-is-bounded", GetTickCount64() - start < 2000 );
+        CHECK( "prefetch-timeout-network-started", WaitForSingleObject( bridge_started, 2000 ) == WAIT_OBJECT_0 );
+        CHECK( "prefetch-timeout-has-no-callback", !completions );
+        CHECK( "prefetch-timeout-block-free", VirtualFree( block, 0, MEM_RELEASE ) );
+        entitled_store_close( store ); store = nullptr;
+        SetEvent( bridge_gate );
+        const ULONGLONG drain = GetTickCount64();
+        while ( InterlockedCompareExchange( &nexus_bounded_fetch_workers, 0, 0 ) && GetTickCount64() - drain < 5000 ) Sleep( 1 );
+        CHECK( "prefetch-timeout-worker-drained", !InterlockedCompareExchange( &nexus_bounded_fetch_workers, 0, 0 ) );
+        CHECK( "prefetch-timeout-no-late-callback", !completions );
+        bridge_timeout = 1500;
+    }
+    if ( store ) entitled_store_close( store );
+    if ( queue ) threads->XTaskQueueCloseHandle( queue );
+    threads->Release();
+}
+
+static void test_prefetch_failure_has_no_callback()
+{
+    IXThreadingImpl *threads = nullptr;
+    XTaskQueueHandle queue = nullptr;
+    XStoreContextHandle store = nullptr;
+    CHECK( "prefetch-failure-threading", FixtureQueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl,
+                                                              reinterpret_cast<void **>( &threads ) ) == S_OK && threads );
+    if ( !threads ) return;
+    CHECK( "prefetch-failure-queue", threads->XTaskQueueCreate( XTaskQueueDispatchMode::Immediate,
+                                                                XTaskQueueDispatchMode::Immediate, &queue ) == S_OK );
+    CHECK( "prefetch-failure-store", entitled_store_create( nullptr, &store ) == S_OK );
+    LONG completions = 0;
+    XAsyncBlock block{};
+    block.queue = queue; block.context = &completions; block.callback = store_lifetime_completion;
+    ResetEvent( bridge_started ); SetEvent( bridge_gate );
+    HRESULT hr = entitled_begin( store, 31, 10, &block, TRUE, FALSE, TRUE, 2000 );
+    CHECK( "prefetch-failure-reports-error", hr == E_FAIL );
+    CHECK( "prefetch-failure-no-callback", !completions );
+    const unsigned char empty[sizeof(block.internal)]{};
+    CHECK( "prefetch-failure-async-untouched", !memcmp( block.internal, empty, sizeof(empty) ) );
+    entitled_store_close( store );
+    threads->XTaskQueueCloseHandle( queue );
+    threads->Release();
+}
+
 static void test_cancel_can_free_async_block_before_network_finishes()
 {
     IXThreadingImpl *threads = nullptr;
@@ -1731,6 +1842,9 @@ int main( void )
     test_addon_licenses();
     test_game_licenses();
     test_current_game_result_lifetime();
+    test_inline_license_lifetime();
+    test_prefetch_timeout_does_not_touch_released_block();
+    test_prefetch_failure_has_no_callback();
     test_cancel_can_free_async_block_before_network_finishes();
     CloseHandle( bridge_started );
     CloseHandle( bridge_gate );

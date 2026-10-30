@@ -286,6 +286,7 @@ class TaskQueuePortImpl : public ITaskQueuePort
 {
 public:
 
+    XTaskQueueDispatchMode DispatchMode() const noexcept { return m_dispatchMode; }
     TaskQueuePortImpl();
     virtual ~TaskQueuePortImpl();
     void WINAPI WakeDispatchers() override { SignalQueue(); }

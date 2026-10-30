@@ -25,6 +25,7 @@
 #include "XPackage.h"
 #include "../Runtime/Configuration.h"
 #include "Store/Bridge.h"
+#include "Threading/QueueHandles.h"
 #include <mutex>
 
 static const char *GetStoreProductId();
@@ -200,7 +201,15 @@ HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForPackageResult(
 
 HRESULT WINAPI XStoreImpl::XStoreQueryGameLicenseAsync( const XStoreContextHandle store, XAsyncBlock *async )
 {
-    return entitled_begin( store, static_cast<UINT32>( XStoreProductKind::Game ), ENTITLED_MAX_PRODUCTS, async, TRUE );
+    // This title closes its context and releases its async block immediately
+    // after the call returns. Its work and completion ports both dispatch
+    // inline; fetch first so its callback can run before the call returns.
+    // Preserve ordinary async behavior for every other title or queue mode.
+    const char *product = GetStoreProductId();
+    const bool prefetch = product && !strcmp( product, "9N1HF804QXN4" ) && async && async->callback &&
+                          async->queue && nexus::queue_dispatches_inline( async->queue );
+    return entitled_begin( store, static_cast<UINT32>( XStoreProductKind::Game ), ENTITLED_MAX_PRODUCTS, async, TRUE,
+                           FALSE, prefetch );
 }
 HRESULT WINAPI XStoreImpl::XStoreQueryGameLicenseResult( XAsyncBlock *async, XStoreGameLicense *license )
 {

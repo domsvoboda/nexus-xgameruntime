@@ -20,7 +20,7 @@ const probes = [
     ['nexus_gamesave-file-paths', 55],
     ['nexus_game-invitations', 56, ['--component']],
 ];
-const binaries = ['xgameruntime.dll', 'test_xgameruntime.exe', 'test_nexus_configuration.exe', 'test_nexus_timer.exe', 'test_nexus_save.exe', 'test_nexus_user.exe', 'test_nexus_async_identity.exe', 'nexus_user-privilege.exe', 'nexus_auth-metadata.exe', 'nexus_store-entitlements.exe', 'nexus_runtime-init.exe', ...probes.map(([name]) => name + '.exe')];
+const binaries = ['xgameruntime.dll', 'test_xgameruntime.exe', 'test_nexus_configuration.exe', 'test_nexus_timer.exe', 'test_nexus_save.exe', 'test_nexus_user.exe', 'test_nexus_async_identity.exe', 'test_nexus_bounded_fetch.exe', 'bounded_fetch_fixture.dll', 'test_nexus_inline_queue.exe', 'nexus_user-privilege.exe', 'nexus_auth-metadata.exe', 'nexus_store-entitlements.exe', 'nexus_runtime-init.exe', ...probes.map(([name]) => name + '.exe')];
 const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const snapshot = () => Object.fromEntries(binaries.map(name => [name, hash(path.join(bin, name))]));
 const before = snapshot(); // Refuse incomplete or tests-disabled builds before creating a prefix.
@@ -70,6 +70,16 @@ try {
     const timerMatch = timers.match(/\[\s*PASSED\s*\]\s+(\d+) tests/);
     if (!timerMatch || Number(timerMatch[1]) < 2 || /\[\s*(SKIPPED|FAILED)\s*\]/.test(timers)) throw Error('Monotonic timer regressions failed');
     proof.results.push({name: 'timer-unit', checks: Number(timerMatch[1]), failures: 0});
+    for (const [name, executable, minimum] of [
+        ['bounded-fetch-unit', 'test_nexus_bounded_fetch.exe', 4],
+        ['inline-queue-unit', 'test_nexus_inline_queue.exe', 2],
+    ]) {
+        const output = execute(name, 'wine', [path.join(bin, executable)]);
+        const summary = output.match(/\[\s*PASSED\s*\]\s+(\d+) tests?/);
+        if (!summary || Number(summary[1]) < minimum || /\[\s*(SKIPPED|FAILED)\s*\]/.test(output))
+            throw Error(name + ' regressions failed');
+        proof.results.push({name, checks: Number(summary[1]), failures: 0});
+    }
     const saves = execute('save-unit', 'wine', [path.join(bin, 'test_nexus_save.exe')]);
     const saveMatch = saves.match(/\[\s*PASSED\s*\]\s+(\d+) tests/);
     if (!saveMatch || Number(saveMatch[1]) < 6 || /\[\s*(SKIPPED|FAILED)\s*\]/.test(saves)) throw Error('Synthetic save regressions failed');
