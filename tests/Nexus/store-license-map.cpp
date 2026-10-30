@@ -297,6 +297,6 @@ int main()
     CHECK(it->HasCurrent(&present) == E_ACCESSDENIED && !present);
     it->Release();
     RoUninitialize();
-    printf("%u checks %u failures\n", checks, failures);
+    printf("CHECKS %u FAILURES %u\n", checks, failures);
     return failures ? 1 : 0;
 }
