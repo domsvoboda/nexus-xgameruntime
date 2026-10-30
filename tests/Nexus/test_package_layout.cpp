@@ -231,7 +231,7 @@ TEST( NexusPackageAbi, EveryVersionKeepsItsIndependentNativeEnumerationSlot )
 }
 
 static void WINAPI PackageInstalledCallback( void *, const XPackageDetails * ) {}
-TEST( NexusPackageAbi, UnsupportedInstallEventsNeverClaimAWorkingSubscription )
+TEST( NexusPackageAbi, UninitializedInstallEventsRejectRegistrationWithoutPublishingAToken )
 {
     auto dll = LoadLibraryW( L"xgameruntime.dll" );
     ASSERT_NE( dll, nullptr );
@@ -241,10 +241,17 @@ TEST( NexusPackageAbi, UnsupportedInstallEventsNeverClaimAWorkingSubscription )
     IXPackageImpl4 *package = nullptr;
     ASSERT_EQ( query( CLSID_XPackageImpl, __uuidof( IXPackageImpl4 ), reinterpret_cast<void **>( &package ) ), S_OK );
     XTaskQueueRegistrationToken token{ 123 };
+    // Installed-content events are supported. Without initialized game
+    // configuration registration must fail without publishing a subscription.
     EXPECT_EQ( package->XPackageRegisterPackageInstalled3( nullptr, nullptr, PackageInstalledCallback, &token ),
-               E_NOTIMPL );
+               E_GAME_MISSING_GAME_CONFIG );
     EXPECT_EQ( token.token, 0u );
     EXPECT_EQ( package->XPackageRegisterPackageInstalled3( nullptr, nullptr, nullptr, &token ), E_INVALIDARG );
+    EXPECT_EQ( token.token, 0u );
+    EXPECT_EQ( package->XPackageRegisterPackageInstalled3( nullptr, nullptr, PackageInstalledCallback, nullptr ),
+               E_INVALIDARG );
+    // TRUE means no callbacks are pending, including a failed registration.
+    EXPECT_TRUE( package->XPackageUnregisterPackageInstalled( token, FALSE ) );
     package->Release();
     FreeLibrary( dll );
 }

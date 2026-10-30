@@ -439,6 +439,8 @@ done:
 struct entitled_async
 {
     LONG refs, canceled, started, terminal;
+    LONG begin_active;
+    DWORD begin_thread;
     BOOL game;
     XStoreContextHandle store;
     UINT64 store_serial, refresh;
@@ -525,6 +527,16 @@ static HRESULT WINAPI entitled_provider( XAsyncOp op, const XAsyncProviderData *
         context->async = data->async;
         InterlockedIncrement( &context->refs );
         InterlockedIncrement( &entitled_worker_count );
+        /* An Immediate work port calls DoWork inline during Begin. Keep its
+         * work and completion on the submitting thread; handing it to a new
+         * thread would let the caller drain an empty queue before completion.
+         * Manual/thread-pool ports retain their cancellable worker behavior. */
+        if ( InterlockedCompareExchange( &context->begin_active, 0, 0 ) &&
+             context->begin_thread == GetCurrentThreadId() )
+        {
+            entitled_worker( context );
+            return E_PENDING;
+        }
         if ( !( worker = CreateThread( NULL, 0, entitled_worker, context, 0, NULL ) ) )
         {
             hr = HRESULT_FROM_WIN32( GetLastError() );
@@ -581,13 +593,19 @@ static HRESULT entitled_start( struct entitled_async *context, XAsyncBlock *asyn
     }
     /* Successful Begin transfers ownership, including provider Begin failure.
      * A failed Begin itself has not installed the provider context. */
+    /* Inline completion can consume the provider context before Begin returns. */
+    InterlockedIncrement( &context->refs );
+    context->begin_thread = GetCurrentThreadId();
+    InterlockedExchange( &context->begin_active, 1 );
     hr = ( context->threading )
              ->XAsyncBegin( async, context,
                             context->game ? &entitled_game_identity
                             : next        ? &entitled_next_identity
                                           : &entitled_identity,
                             "XStoreEntitledProducts", entitled_provider );
+    InterlockedExchange( &context->begin_active, 0 );
     if ( FAILED( hr ) ) entitled_async_release( context );
+    entitled_async_release( context ); /* Begin reference */
     return hr;
 }
 

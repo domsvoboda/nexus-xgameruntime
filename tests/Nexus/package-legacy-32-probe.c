@@ -29,6 +29,7 @@ typedef ULONG (WINAPI *Ref)(Package *);
 typedef HRESULT (WINAPI *Identifier)(Package *, const char *, SIZE_T, char *);
 typedef HRESULT (WINAPI *Mount)(Package *, const char *, void **);
 typedef HRESULT (WINAPI *Register)(Package *, void *, void *, void *, int64_t *);
+typedef BYTE (WINAPI *Unregister)(Package *, int64_t, BYTE);
 typedef HRESULT (WINAPI *Features)(Package *, const char *, void *, void *);
 static const GUID package_class = {0xaf406016,0xe850,0x4aa8,{0xa8,0x8d,0x2f,0x3d,0xcb,0x9d,0xac,0x7e}};
 static const GUID legacy_iid = {0xbe3f3e9f,0xc4b3,0x424d,{0x9a,0x95,0xd1,0xaf,0x06,0x05,0x59,0xa5}};
@@ -66,6 +67,13 @@ static BYTE WINAPI feature_visit(void *context, const void *feature)
     return TRUE;
 }
 
+static LONG installed_calls;
+static void WINAPI installed(void *context, const Details *details)
+{
+    (void)details;
+    InterlockedIncrement((LONG *)context);
+}
+
 static void exercise(Package *package)
 {
     const unsigned slots[] = {20, 28, 35, 39};
@@ -95,8 +103,17 @@ static void exercise(Package *package)
     CHECK(identifier(package, "B00000000001", 33, NULL) == E_INVALIDARG);
     CHECK(((Mount)package->vtable[23])(package, id, &mount) == E_NOTIMPL && !mount);
     CHECK(((Mount)package->vtable[23])(package, id, NULL) == E_INVALIDARG);
-    CHECK(((Register)package->vtable[21])(package, NULL, NULL, (void *)visit, &token) == E_NOTIMPL && !token);
-    CHECK(((Register)package->vtable[21])(package, NULL, NULL, NULL, &token) == E_INVALIDARG);
+    /* Every inherited registration slot supports installed-content events. */
+    for (i = 0; i < sizeof(slots)/sizeof(slots[0]); ++i) {
+        Register reg = (Register)package->vtable[slots[i] + 1];
+        InterlockedExchange(&installed_calls, 0);
+        token = 0;
+        CHECK(reg(package, NULL, &installed_calls, (void *)installed, &token) == S_OK && token);
+        CHECK(((Unregister)package->vtable[22])(package, token, TRUE));
+        CHECK(installed_calls == 0); /* Registration does not replay installed packages. */
+        CHECK(reg(package, NULL, NULL, NULL, &token) == E_INVALIDARG && !token);
+        CHECK(reg(package, NULL, NULL, (void *)installed, NULL) == E_INVALIDARG);
+    }
     CHECK(((Features)package->vtable[31])(package, id, NULL, NULL) == E_INVALIDARG);
     visits = 0;
     CHECK(((Features)package->vtable[31])(package, id, &visits, (void *)feature_visit) == S_OK && !visits);

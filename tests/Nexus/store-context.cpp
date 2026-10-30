@@ -89,7 +89,20 @@ int main()
     receipt.isActive=true;receipt.expirationDate=std::time(nullptr)+60;
     CHECK(activeOperation());
     verdict=E_ACCESSDENIED;
-    CHECK(!activeOperation()); // No fallback to previous successful receipt.
+    auto *failed=new AppLicenseOperation;
+    Handler failedHandler;
+    CHECK(failed->put_Completed(&failedHandler)==S_OK);
+    CHECK(failed->start()==S_OK);
+    CHECK(wait(failed)==STATUS_ERROR);
+    HRESULT failure=S_OK;
+    CHECK(failed->get_ErrorCode(&failure)==S_OK && failure==E_ACCESSDENIED);
+    IStoreAppLicense_ *denied=reinterpret_cast<IStoreAppLicense_ *>(1);
+    CHECK(failed->GetResults(&denied)==E_ACCESSDENIED && !denied);
+    for(int i=0;i<100 && !failedHandler.calls;++i)Sleep(1);
+    CHECK(failedHandler.calls==1 && failedHandler.terminal==STATUS_ERROR);
+    failed->Release();
+    Sleep(10);
+    CHECK(failedHandler.refs==1);
     verdict=S_OK;receipt.isActive=false;
     CHECK(!activeOperation()); // Different account, no rights.
     receipt.isActive=true;receipt.expirationDate=std::time(nullptr)-1;

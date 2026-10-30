@@ -1604,6 +1604,51 @@ static void test_current_game_result_lifetime()
     entitled_store_close( other );
 }
 
+struct immediate_license_observation
+{
+    IXThreadingImpl *threads;
+    DWORD callback_thread;
+    LONG callbacks;
+    HRESULT status;
+};
+static void WINAPI immediate_license_completed(XAsyncBlock *block)
+{
+    auto *observation=static_cast<immediate_license_observation *>(block->context);
+    observation->status=observation->threads->XAsyncGetStatus(block,FALSE);
+    observation->callback_thread=GetCurrentThreadId();
+    InterlockedIncrement(&observation->callbacks);
+}
+static DWORD WINAPI release_immediate_license_bridge(void *)
+{
+    if(WaitForSingleObject(bridge_started,2000)==WAIT_OBJECT_0) Sleep(20);
+    SetEvent(bridge_gate);
+    return 0;
+}
+static void test_immediate_license_work_stays_on_submitting_thread()
+{
+    IXThreadingImpl *threads=nullptr;
+    XTaskQueueHandle queue=nullptr;
+    XStoreContextHandle store=nullptr;
+    CHECK("immediate-license-threading",FixtureQueryApiImpl(CLSID_XThreadingImpl,IID_IXThreadingImpl,(void **)&threads)==S_OK && threads);
+    if(!threads)return;
+    CHECK("immediate-license-queue",threads->XTaskQueueCreate(XTaskQueueDispatchMode::Immediate,XTaskQueueDispatchMode::Immediate,&queue)==S_OK);
+    CHECK("immediate-license-store",entitled_store_create(nullptr,&store)==S_OK);
+    immediate_license_observation observation{threads,0,0,E_PENDING};
+    XAsyncBlock block{};block.queue=queue;block.context=&observation;block.callback=immediate_license_completed;
+    ResetEvent(bridge_started);ResetEvent(bridge_gate);
+    HANDLE release=CreateThread(nullptr,0,release_immediate_license_bridge,nullptr,0,nullptr);
+    CHECK("immediate-license-release-thread",release!=nullptr);
+    const DWORD caller=GetCurrentThreadId();
+    CHECK("immediate-license-begin",entitled_begin(store,4,10,&block,TRUE)==S_OK);
+    const LONG callbacks_on_return=InterlockedCompareExchange(&observation.callbacks,0,0);
+    CHECK("immediate-license-completed-before-return",callbacks_on_return==1);
+    CHECK("immediate-license-failure-status",threads->XAsyncGetStatus(&block,TRUE)==E_FAIL);
+    CHECK("immediate-license-same-thread",observation.callback_thread==caller);
+    CHECK("immediate-license-no-fabricated-grant",observation.status==E_FAIL && observation.callbacks==1);
+    if(release){WaitForSingleObject(release,3000);CloseHandle(release);}
+    entitled_store_close(store);threads->XTaskQueueCloseHandle(queue);threads->Release();
+}
+
 static void test_cancel_can_free_async_block_before_network_finishes()
 {
     IXThreadingImpl *threads = nullptr;
@@ -1760,6 +1805,7 @@ int main( void )
     test_addon_licenses();
     test_game_licenses();
     test_current_game_result_lifetime();
+    test_immediate_license_work_stays_on_submitting_thread();
     test_cancel_can_free_async_block_before_network_finishes();
     CloseHandle( bridge_started );
     CloseHandle( bridge_gate );
