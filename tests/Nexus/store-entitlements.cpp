@@ -80,6 +80,7 @@ HRESULT xpackage_query_content_store( const char *identifier, SIZE_T size, char 
 }
 #include "../../src/System/Store/PackageLicense.h"
 #include "../../src/System/Store/AddonLicense.h"
+#include "../../src/System/Store/StoreLicenseProjection.h"
 
 static unsigned checks, failures, callbacks, enumerated;
 #define CHECK( name, expr )                                                                                            \
@@ -968,6 +969,34 @@ static void test_addon_licenses( void )
     proof.proof_until = time( NULL ) + 60;
     CHECK( "addon-proof",
            addon_licenses_from_snapshot( &proof, &licenses, &count, &until ) == S_OK && count == 1 && licenses );
+    nexus_store_context::AddonLicenseSnapshot projected;
+    CHECK("winrt-durable-projection", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK &&
+          projected.licenses.size()==1 && projected.licenses[0].sku=="B00000000002/0010" &&
+          projected.licenses[0].offer=="bonus" && projected.licenses[0].expiration==(INT64)proof.proof_until);
+    skus[1].isTrial=TRUE;
+    CHECK("winrt-trial-projection", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.size()==1 && projected.licenses[0].trial);
+    skus[1].isTrial=FALSE;
+    products[1].hasDigitalDownload=TRUE;
+    CHECK("winrt-packaged-durable-included", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.size()==1);
+    products[1].hasDigitalDownload=FALSE;
+    products[1].productKind=XStoreProductKind::Consumable;
+    CHECK("winrt-consumable-excluded", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.empty());
+    products[1].productKind=XStoreProductKind::Durable;
+    skus[1].isInUserCollection=FALSE;
+    CHECK("winrt-unowned-excluded", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.empty());
+    skus[1].isInUserCollection=TRUE;
+    const auto old_end=skus[1].collectionData.endDate;
+    skus[1].collectionData.endDate=time(NULL)-1;
+    CHECK("winrt-expired-excluded", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==S_OK && projected.licenses.empty());
+    skus[1].collectionData.endDate=old_end;
+    UINT64 old_proof=proof.proof_until;proof.proof_until=0;
+    CHECK("winrt-unsigned-denied", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==E_ACCESSDENIED && projected.licenses.empty());
+    proof.proof_until=time(NULL)-1;
+    CHECK("winrt-stale-denied", nexus_store_context::addon_data_from_verified_snapshot(&proof, &projected)==E_ACCESSDENIED && projected.licenses.empty());
+    proof.proof_until=old_proof;
+    CHECK("winrt-null-snapshot", nexus_store_context::addon_data_from_verified_snapshot(nullptr, &projected)==E_ACCESSDENIED);
+    CHECK("winrt-null-output", nexus_store_context::addon_data_from_verified_snapshot(&proof, nullptr)==E_POINTER);
+
     if ( licenses )
     {
         CHECK( "addon-sku-id", !strcmp( licenses[0].skuStoreId, "B00000000002/0010" ) );

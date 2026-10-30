@@ -111,6 +111,8 @@ cleanup:
 
 /* Identity metadata is optional and never controls authentication success. */
 #include "User/AccountMetadata.h"
+#include "User/AuthRejectionMetadata.h"
+#include "User/TokenEndpoint.h"
 
 /* Private opt-in diagnostics: numeric metadata only, never credentials or URLs.
  * The caller must pre-create the private file; bounded to 32 KiB. */
@@ -2206,56 +2208,15 @@ static HRESULT WINAPI token_signature_phase( XAsyncOp op, const XAsyncProviderDa
 
     case XAsyncOp::DoWork:
     {
-        WCHAR *partyBuf = NULL;
+        HSTRING ownedParty = nullptr, ownedType = nullptr;
         auth_metadata( "get-token-begin", context->user, E_PENDING, 0, TRUE, !!context->user->titleToken );
-        /* Fallback relying party for URLs missing from the endpoint table;
-         * heap-owned only for the web-origin case, freed at complete. */
         if ( FAILED( hr = ( context->user )->GetEndpointInfo( context->url, &info ) ) )
         {
-            /* The endpoint table only covers the partners returned at sign-in.
-             * Titles also request tokens for other services: Xbox Live hosts
-             * (e.g. the RTA websocket at wss://rta.xboxlive.com/connect) get an
-             * XSTS token for the xboxlive.com relying party, and any other host
-             * gets one scoped to the web origin of the requested URL, exactly
-             * how the GDK scopes tokens for title backends (Deep Rock
-             * Galactic's server browser signs services.ghostship.dk). The
-             * XSTS service still enforces whether the title may request it. */
-            static const WCHAR xboxlivePartyW[] = L"http://xboxlive.com";
-            static const WCHAR typeW[] = L"JWT";
-            const char *host, *hostEnd;
-            size_t hostLen, partyLen;
-            HSTRING_HEADER partyHeader, typeHeader;
-
-            host = strstr( context->url, "://" );
-            host = host ? host + 3 : context->url;
-            hostEnd = strchr( host, '/' );
-            hostLen = hostEnd ? hostEnd - host : strlen( host );
             memset( &info, 0, sizeof( info ) );
-            if ( ( hostLen >= 13 && !strncasecmp( host + hostLen - 13, ".xboxlive.com", 13 ) ) ||
-                 ( hostLen == 12 && !strncasecmp( host, "xboxlive.com", 12 ) ) )
-            {
-                if ( FAILED( hr = WindowsCreateStringReference( xboxlivePartyW, ARRAY_SIZE( xboxlivePartyW ) - 1,
-                                                                &partyHeader, &info.relyingParty ) ) )
-                    goto complete;
-            }
-            else
-            {
-                partyLen = 8 + hostLen;
-                if ( !( partyBuf = static_cast<std::remove_reference_t<decltype( partyBuf )>>(
-                            calloc( partyLen + 1, sizeof( WCHAR ) ) ) ) )
-                {
-                    hr = E_OUTOFMEMORY;
-                    goto complete;
-                }
-                MultiByteToWideChar( CP_UTF8, 0, "https://", 8, partyBuf, partyLen );
-                MultiByteToWideChar( CP_UTF8, 0, host, hostLen, partyBuf + 8, partyLen - 8 );
-                if ( FAILED(
-                         hr = WindowsCreateStringReference( partyBuf, partyLen, &partyHeader, &info.relyingParty ) ) )
-                    goto complete;
-            }
-            if ( FAILED( hr = WindowsCreateStringReference( typeW, ARRAY_SIZE( typeW ) - 1, &typeHeader,
-                                                            &info.tokenType ) ) )
-                goto complete;
+            if ( FAILED( hr = token_fallback_party( context->url, &ownedParty ) ) ||
+                 FAILED( hr = WindowsCreateString( L"JWT", 3, &ownedType ) ) ) goto complete;
+            info.relyingParty = ownedParty;
+            info.tokenType = ownedType;
         }
         if ( info.tokenType &&
              FAILED( hr = ( context->user )
@@ -2362,7 +2323,8 @@ static HRESULT WINAPI token_signature_phase( XAsyncOp op, const XAsyncProviderDa
     error:
         hr = HRESULT_FROM_WIN32( GetLastError() );
     complete:
-        free( partyBuf );
+        WindowsDeleteString( ownedParty );
+        WindowsDeleteString( ownedType );
         auth_metadata( "get-token-complete", context->user, hr, 0, TRUE, !!context->user->titleToken );
         if ( FAILED( hr ) )
         {
@@ -3104,6 +3066,7 @@ static HRESULT xsts_authorize_privilege( XUserHandle user, const char *relyingPa
         goto cleanup;
     if ( status != 200 )
     {
+        auth_rejection_metadata(relyingParty, status, buffer, bufferSize);
         ERR( "xsts authorization failed, status %lu.\n", status );
         hr = E_FAIL;
         goto cleanup;

@@ -1,3 +1,13 @@
+foreach(probe IN ITEMS auth-rejection-metadata token-endpoint)
+    add_executable(nexus_${probe} Nexus/${probe}.cpp)
+    add_dependencies(nexus_${probe} xgameruntime-idl)
+    target_include_directories(nexus_${probe} PRIVATE "${IDL_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/include")
+    target_link_libraries(nexus_${probe} PRIVATE xgameruntime-common runtimeobject ole32)
+    target_compile_features(nexus_${probe} PRIVATE cxx_std_23)
+    target_link_options(nexus_${probe} PRIVATE -static -static-libgcc -static-libstdc++)
+    set_target_properties(nexus_${probe} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endforeach()
+
 configure_file(Nexus/MicrosoftGame.config "${CMAKE_BINARY_DIR}/bin/MicrosoftGame.config" COPYONLY)
 
 add_executable(nexus_store-context Nexus/store-context.cpp)
@@ -7,6 +17,13 @@ target_link_libraries(nexus_store-context PRIVATE xgameruntime-common runtimeobj
 target_compile_features(nexus_store-context PRIVATE cxx_std_23)
 target_link_options(nexus_store-context PRIVATE -static -static-libgcc -static-libstdc++)
 set_target_properties(nexus_store-context PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+add_executable(nexus_store-license-map Nexus/store-license-map.cpp)
+add_dependencies(nexus_store-license-map xgameruntime-idl)
+target_include_directories(nexus_store-license-map PRIVATE "${IDL_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(nexus_store-license-map PRIVATE xgameruntime-common runtimeobject ole32)
+target_compile_features(nexus_store-license-map PRIVATE cxx_std_23)
+target_link_options(nexus_store-license-map PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_store-license-map PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_executable(nexus_store-context-raw Nexus/store-context-raw.cpp)
 target_link_libraries(nexus_store-context-raw PRIVATE runtimeobject ole32)
 target_compile_features(nexus_store-context-raw PRIVATE cxx_std_23)
@@ -71,6 +88,12 @@ target_link_libraries(test_nexus_configuration PRIVATE xgameruntime-impl GTest::
 target_compile_features(test_nexus_configuration PRIVATE cxx_std_23)
 target_link_options(test_nexus_configuration PRIVATE -static -static-libgcc -static-libstdc++)
 set_target_properties(test_nexus_configuration PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(nexus_legacy-service-client Nexus/legacy-service-client.cpp)
+target_link_libraries(nexus_legacy-service-client PRIVATE xgameruntime-impl nexus-xml2)
+target_compile_features(nexus_legacy-service-client PRIVATE cxx_std_23)
+target_link_options(nexus_legacy-service-client PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_legacy-service-client PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # For discovery purposes.
 set_target_properties(test_xgameruntime PROPERTIES
@@ -170,6 +193,15 @@ foreach(probe store-entitlements package-content)
     set_target_properties(nexus_${probe} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endforeach()
 target_link_libraries(nexus_package-content PRIVATE xgameruntime-impl)
+
+add_executable(nexus_package-installed Nexus/package-installed.cpp)
+add_dependencies(nexus_package-installed xgameruntime-idl)
+target_compile_definitions(nexus_package-installed PRIVATE __WINESRC__)
+target_include_directories(nexus_package-installed PRIVATE "${IDL_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/include")
+target_compile_features(nexus_package-installed PRIVATE cxx_std_17)
+target_link_options(nexus_package-installed PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_package-installed PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 
 if(NEXUS_MIGRATION_PROBES)
     foreach(probe game-relaunch game-relaunch-search async-provider-contract)
