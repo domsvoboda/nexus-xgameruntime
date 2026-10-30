@@ -1,17 +1,21 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later
  * Windows.Services.Store.StoreContext for packaged desktop titles.
  *
- * Some titles (Age of Empires IV) also check their license through the Windows
- * Store API and quit when it is unavailable. The answer here is the runtime's
- * verified game license: the same signed receipt XStoreQueryGameLicenseAsync
- * uses. Nothing is granted that the receipt does not prove. Only the app
- * license is provided; every other StoreContext method returns E_NOTIMPL. */
+ * App licenses use the same verified receipts as XStoreQueryGameLicenseAsync.
+ * Durable add-on collections use fresh verified entitlements, including
+ * packaged and package-free products. Unsupported Store operations retain
+ * E_NOTIMPL; unavailable licenses never fall back to an empty owned collection. */
 
 #include <inspectable.h>
 #include <winstring.h>
 #include <atomic>
 #include <ctime>
 #include <new>
+#include <memory>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include "StoreLicenseData.h"
 
 namespace nexus_store_context
 {
@@ -143,6 +147,8 @@ static HRESULT make_hstring( const char *text, HSTRING *out )
         return S_OK;                                                                                                 \
     }
 
+#include "StoreLicenseMap.h"
+
 class AppLicense final : public IStoreAppLicense_
 {
     std::atomic<ULONG> refs{ 1 };
@@ -207,7 +213,15 @@ public:
     {
         if ( !value ) return E_POINTER;
         *value = nullptr;
-        return E_NOTIMPL;
+        if (!license.isActive || license.expirationDate <= std::time(nullptr)) return E_ACCESSDENIED;
+        try
+        {
+            AddonLicenseSnapshot snapshot;
+            HRESULT hr = query_addon_licenses(&snapshot);
+            if (FAILED(hr)) return hr;
+            return make_addon_license_map(std::move(snapshot), value);
+        }
+        catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
     }
     HRESULT STDMETHODCALLTYPE get_TrialTimeRemaining( INT64 *value ) override
     {

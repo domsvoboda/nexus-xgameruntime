@@ -9,6 +9,7 @@ if (!buildArg || process.argv.length !== 3) throw Error('Usage: test-component.m
 const build = fs.realpathSync(buildArg), bin = path.join(build, 'bin');
 const probes = [
     ['nexus_store-context', 61],
+    ['nexus_store-license-map', 66],
     ['nexus_user-device-association',6309], ['nexus_user-audio',334], ['nexus_windows-account-metadata',1713],
     ['nexus_game-relaunch',64], ['nexus_game-relaunch-search', 116], ['nexus_async-provider-contract',116], ['nexus_system_device_id', 332], ['nexus_async-schedule', 16],
     ['nexus_async-completion-lifetime', 2805], ['nexus_taskqueue-teardown', 20],
