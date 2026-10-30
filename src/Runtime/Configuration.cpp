@@ -2,6 +2,7 @@
 // Package-family derivation preserves the original Wine/Olivia Ryan algorithm.
 #include "../private.h"
 #include "Configuration.h"
+#include "LegacyServiceClient.h"
 #include <bcrypt.h>
 #include <charconv>
 #include <atomic>
@@ -165,6 +166,8 @@ static HRESULT load( GameConfiguration &config, const INITIALIZE_OPTIONS *option
             }
         }
     }
+    hr = LoadLegacyServiceClient( config );
+    if ( FAILED( hr ) ) return hr == E_OUTOFMEMORY ? hr : E_GAMERUNTIME_GAMECONFIG_BAD_FORMAT;
     // Launcher discovery hints cannot grant rights. Malformed hints are ignored
     // atomically, without discarding the manifest list or creating entitlements.
     char hint[256 * 13];

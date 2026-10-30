@@ -89,6 +89,12 @@ target_compile_features(test_nexus_configuration PRIVATE cxx_std_23)
 target_link_options(test_nexus_configuration PRIVATE -static -static-libgcc -static-libstdc++)
 set_target_properties(test_nexus_configuration PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+add_executable(nexus_legacy-service-client Nexus/legacy-service-client.cpp)
+target_link_libraries(nexus_legacy-service-client PRIVATE xgameruntime-impl nexus-xml2)
+target_compile_features(nexus_legacy-service-client PRIVATE cxx_std_23)
+target_link_options(nexus_legacy-service-client PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_legacy-service-client PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # For discovery purposes.
 set_target_properties(test_xgameruntime PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin" )
