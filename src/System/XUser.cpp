@@ -1289,23 +1289,29 @@ static HRESULT user_wait_init( XUserHandle user )
     return hr;
 }
 
+/* Glob match of an endpoint host pattern ('*' any run, '?' any one character),
+ * backtracking to the most recent '*'. A trailing '*' still matches once the
+ * input is exhausted, so a title's catch-all "*" entry matches every host, as
+ * on Windows; without that, such titles fall back to an XSTS token for
+ * https://<host>, which XSTS rejects with 400. Hosts compare
+ * case-insensitively, like the exact entries in GetEndpointInfo. */
 static BOOLEAN match_wildcard( const WCHAR *pat, UINT32 patLen, const WCHAR *inp, UINT32 inpLen )
 {
-    UINT32 lastMatch = -1, lastWildcard = -1, patOff = 0, inpOff = 0;
+    UINT32 lastMatch = 0, lastWildcard = ~0u, patOff = 0, inpOff = 0;
 
-    while ( inpOff < inpLen && patOff < patLen )
+    while ( inpOff < inpLen )
     {
-        if ( pat[patOff] == '*' )
+        if ( patOff < patLen && pat[patOff] == '*' )
         {
             lastWildcard = patOff++;
             lastMatch = inpOff;
         }
-        else if ( pat[patOff] == '?' || pat[patOff] == inp[inpOff] )
+        else if ( patOff < patLen && ( pat[patOff] == '?' || !wcsnicmp( pat + patOff, inp + inpOff, 1 ) ) )
         {
             patOff++;
             inpOff++;
         }
-        else if ( lastWildcard != -1 )
+        else if ( lastWildcard != ~0u )
         {
             patOff = lastWildcard + 1;
             inpOff = ++lastMatch;
@@ -1313,8 +1319,9 @@ static BOOLEAN match_wildcard( const WCHAR *pat, UINT32 patLen, const WCHAR *inp
         else
             return FALSE;
     }
+    while ( patOff < patLen && pat[patOff] == '*' ) patOff++;
 
-    return inpOff == inpLen && patOff == patLen;
+    return patOff == patLen;
 }
 
 HRESULT WINAPI XUser::GetEndpointInfo( const char *url, struct endpoint *info )
@@ -2218,8 +2225,17 @@ static HRESULT WINAPI token_signature_phase( XAsyncOp op, const XAsyncProviderDa
             info.relyingParty = ownedParty;
             info.tokenType = ownedType;
         }
-        if ( info.tokenType &&
-             FAILED( hr = ( context->user )
+        /* A matched entry without a token type (a title's catch-all "*" host,
+         * with empty RelyingParty and TokenType) needs no token. Report it as
+         * E_GAMEUSER_NO_TOKEN_REQUIRED, which XSAPI treats as "send no auth
+         * headers", as on Windows; success with no token crashes 007 First
+         * Light at its title screen. */
+        if ( !WindowsGetStringLen( info.tokenType ) )
+        {
+            hr = E_GAMEUSER_NO_TOKEN_REQUIRED;
+            goto complete;
+        }
+        if ( FAILED( hr = ( context->user )
                               ->GetAuthorization( WindowsGetStringRawBuffer( info.relyingParty, NULL ), &auth ) ) )
             goto complete;
 
