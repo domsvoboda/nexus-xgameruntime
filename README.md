@@ -8,6 +8,8 @@ Nexus integrations include account authentication, cloud saves, package metadata
 
 Associated-product queries use the public retail catalog with fixed 25-item service windows and local result pages limited to 100 items. They support the currently configured title only; foreign association roots, authenticated or private-audience catalogs and purchase UI are not supported. Collection flags come from verified current-title Store receipts, never from the public listing. 32-bit parity is not verified.
 
+The mount-with-UI API currently supports a single signed-in, verified adult account. It acquires a fresh package license and creates a private mounted view. Unknown, child and teen accounts fail closed because parental-consent UI is not implemented; this is not full GDK consent behavior.
+
 ## Building
 
 Linux cross-compilation requires CMake 3.20 or later, Make, MinGW-w64 with C++23 support, and Wine's WIDL. Tests also require Node.js 22, Wine with both Windows architectures enabled, the pinned GoogleTest submodule, and the Wine source tree selected by `cmake/xml2.lock.json`. Its bundled libxml2 is compiled from source, with every input checked against that lock.

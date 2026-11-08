@@ -461,6 +461,83 @@ static BOOL mount_fixture_bytes( const std::wstring &path, const char *expected 
         !memcmp( bytes, expected, size );
     CloseHandle( file ); return ok;
 }
+static HANDLE mount_ui_entered, mount_ui_continue, mount_ui_finished;
+static HRESULT mount_ui_test_blocked_verify( UINT64 *id )
+{
+    SetEvent( mount_ui_entered );
+    WaitForSingleObject( mount_ui_continue, 10000 );
+    *id = 1;
+    SetEvent( mount_ui_finished );
+    return S_OK;
+}
+static HRESULT mount_ui_test_unexpected_mount( const char *, XPackageMountHandle * )
+{
+    return E_UNEXPECTED;
+}
+static void test_mount_ui_cancel()
+{
+    IXThreadingImpl *threads = NULL;
+    CHECK( "mount-ui-cancel-threads", SUCCEEDED( QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&threads ) ) && threads );
+    if ( !threads ) return;
+    XTaskQueueHandle queue = NULL;
+    CHECK( "mount-ui-cancel-queue", SUCCEEDED( threads->XTaskQueueCreate( XTaskQueueDispatchMode::ThreadPool, XTaskQueueDispatchMode::ThreadPool, &queue ) ) );
+    if ( !queue ) { threads->Release(); return; }
+    mount_ui_entered = CreateEventW( NULL, TRUE, FALSE, NULL );
+    mount_ui_continue = CreateEventW( NULL, TRUE, FALSE, NULL );
+    mount_ui_finished = CreateEventW( NULL, TRUE, FALSE, NULL );
+    auto context = new mount_ui_context;
+    context->threads = threads;
+    threads->AddRef();
+    context->verify = mount_ui_test_blocked_verify;
+    context->mount_package = mount_ui_test_unexpected_mount;
+    XAsyncBlock async{};
+    async.queue = queue;
+    HRESULT started = threads->XAsyncBegin( &async, context, &mount_ui_identity, "mount-ui-cancel-test", mount_ui_provider );
+    CHECK( "mount-ui-cancel-start", started == S_OK );
+    if ( SUCCEEDED( started ) )
+    {
+        CHECK( "mount-ui-worker-blocked", WaitForSingleObject( mount_ui_entered, 10000 ) == WAIT_OBJECT_0 );
+        threads->XAsyncCancel( &async );
+        CHECK( "mount-ui-cancel-completes-promptly", threads->XAsyncGetStatus( &async, FALSE ) == E_ABORT );
+        SetEvent( mount_ui_continue );
+        CHECK( "mount-ui-worker-released", WaitForSingleObject( mount_ui_finished, 10000 ) == WAIT_OBJECT_0 );
+    }
+    else mount_ui_release( context );
+    threads->XTaskQueueCloseHandle( queue );
+    threads->Release();
+    CloseHandle( mount_ui_entered );
+    CloseHandle( mount_ui_continue );
+    CloseHandle( mount_ui_finished );
+}
+static void test_mount_ui_validation()
+{
+    XPackageImpl instance;
+    IXPackageImpl4 *api = &instance;
+    XAsyncBlock async{};
+    XPackageMountHandle mount = ( XPackageMountHandle )1;
+    CHECK( "mount-ui-null-async", api->XPackageMountWithUiAsync( "00000030111122223333444444444444", NULL ) == E_INVALIDARG );
+    CHECK( "mount-ui-null-id", api->XPackageMountWithUiAsync( NULL, &async ) == E_INVALIDARG );
+    CHECK( "mount-ui-invalid-id", api->XPackageMountWithUiAsync( "bad", &async ) == E_INVALIDARG );
+    CHECK( "mount-ui-null-result", api->XPackageMountWithUiResult( &async, NULL ) == E_INVALIDARG );
+    CHECK( "mount-ui-null-result-async", api->XPackageMountWithUiResult( NULL, &mount ) == E_INVALIDARG );
+    IXThreadingImpl *threads = NULL;
+    CHECK( "mount-ui-threads", SUCCEEDED( QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&threads ) ) && threads );
+    if ( threads )
+    {
+        XTaskQueueHandle queue = NULL;
+        CHECK( "mount-ui-queue", SUCCEEDED( threads->XTaskQueueCreate( XTaskQueueDispatchMode::ThreadPool, XTaskQueueDispatchMode::ThreadPool, &queue ) ) );
+        if ( queue )
+        {
+            async.queue = queue;
+            CHECK( "mount-ui-starts-async", api->XPackageMountWithUiAsync( "00000030111122223333444444444444", &async ) == S_OK );
+            CHECK( "mount-ui-no-user-fails", FAILED( threads->XAsyncGetStatus( &async, TRUE ) ) );
+            mount = ( XPackageMountHandle )1;
+            CHECK( "mount-ui-no-user-no-handle", FAILED( api->XPackageMountWithUiResult( &async, &mount ) ) && !mount );
+            threads->XTaskQueueCloseHandle( queue );
+        }
+        threads->Release();
+    }
+}
 static void test_mount_projection()
 {
     configure( main_config );
@@ -499,6 +576,17 @@ static void test_mount_projection()
     CHECK( "mount-second-independent-view", package_mount_create( package, mount_fixture_right( second ), &other ) == S_OK && other && mount != other );
     if ( mount && other )
     {
+        mount_ui_context transfer;
+        transfer.mount = mount;
+        XPackageMountHandle received = NULL;
+        XAsyncProviderData result{};
+        result.context = &transfer;
+        result.buffer = &received;
+        result.bufferSize = sizeof( received ) - 1;
+        CHECK( "mount-ui-short-result-preserves-handle", mount_ui_provider( XAsyncOp::GetResult, &result ) == E_INVALIDARG && transfer.mount == mount && !received );
+        result.bufferSize = sizeof( received );
+        CHECK( "mount-ui-result-transfers-handle", mount_ui_provider( XAsyncOp::GetResult, &result ) == S_OK && received == mount && !transfer.mount );
+        CHECK( "mount-ui-result-cannot-repeat", mount_ui_provider( XAsyncOp::GetResult, &result ) == E_INVALIDARG );
         IXPackageImpl *api = GetPackageInterface();
         SIZE_T size = 0;
         CHECK( "mount-size-includes-terminator", api->XPackageGetMountPathSize( mount, &size ) == S_OK && size > 1 && size < MAX_PATH * 4 );
@@ -890,6 +978,8 @@ int main( int argc, char **argv )
     test_mount_projection();
     test_mount_exclude();
     test_deployed_destination();
+    test_mount_ui_validation();
+    test_mount_ui_cancel();
     printf( "CHECKS %u FAILURES %u\n", checks, failures );
     return failures ? 1 : 0;
 }
