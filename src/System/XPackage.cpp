@@ -571,16 +571,121 @@ HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalled2( XTaskQueueHandle
     return installed_package_register( queue, context, callback, token );
 }
 
+/* This runtime has one signed-in user and no parental-consent UI. Restrict
+ * this implementation to a verified adult; unknown, child and teen accounts
+ * must fail closed until consent UI and all-user policy are implemented. */
+static HRESULT mount_ui_adult( UINT64 *id )
+{
+    IXUserImpl *users = NULL;
+    XUserHandle user = NULL;
+    XUserAgeGroup age = XUserAgeGroup::Unknown;
+    XUserLocalId local{ 1 };
+    HRESULT hr = QueryApiImpl( CLSID_XUserImpl, IID_IXUserImpl, ( void ** )&users );
+    if ( SUCCEEDED( hr ) ) hr = users->XUserFindUserByLocalId( local, &user );
+    if ( SUCCEEDED( hr ) ) hr = users->XUserGetAgeGroup( user, &age );
+    if ( SUCCEEDED( hr ) && age != XUserAgeGroup::Adult ) hr = E_ACCESSDENIED;
+    if ( SUCCEEDED( hr ) ) hr = users->XUserGetId( user, id );
+    if ( user ) users->XUserCloseHandle( user );
+    if ( users ) users->Release();
+    return hr;
+}
+
+struct mount_ui_context
+{
+    LONG refs = 1, canceled = 0, completed = 0;
+    IXThreadingImpl *threads = NULL;
+    XAsyncBlock *async = NULL;
+    XPackageMountHandle mount = NULL;
+    HRESULT ( *verify )( UINT64 * ) = mount_ui_adult;
+    HRESULT ( *mount_package )( const char *, XPackageMountHandle * ) = package_mount_legacy;
+    char identifier[33]{};
+};
+static const char mount_ui_identity{};
+static void mount_ui_release( mount_ui_context *context )
+{
+    if ( InterlockedDecrement( &context->refs ) ) return;
+    if ( context->mount ) package_mount_close( context->mount );
+    context->threads->Release();
+    delete context;
+}
+static DWORD WINAPI mount_ui_worker( void *arg )
+{
+    auto context = static_cast<mount_ui_context *>( arg );
+    UINT64 before = 0, after = 0;
+    HRESULT com = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    HRESULT hr = FAILED( com ) ? com : context->verify( &before );
+    if ( SUCCEEDED( hr ) )
+        hr = InterlockedCompareExchange( &context->canceled, 0, 0 )
+                 ? E_ABORT : context->mount_package( context->identifier, &context->mount );
+    if ( SUCCEEDED( hr ) ) hr = context->verify( &after );
+    if ( SUCCEEDED( hr ) && before != after ) hr = E_ACCESSDENIED;
+    if ( InterlockedCompareExchange( &context->canceled, 0, 0 ) ) hr = E_ABORT;
+    if ( !InterlockedCompareExchange( &context->completed, 1, 0 ) )
+        context->threads->XAsyncComplete( context->async, hr, SUCCEEDED( hr ) ? sizeof( context->mount ) : 0 );
+    if ( SUCCEEDED( com ) ) CoUninitialize();
+    mount_ui_release( context );
+    return 0;
+}
+static HRESULT WINAPI mount_ui_provider( XAsyncOp op, const XAsyncProviderData *data )
+{
+    auto context = static_cast<mount_ui_context *>( data->context );
+    switch ( op )
+    {
+    case XAsyncOp::Begin: return context->threads->XAsyncSchedule( data->async, 0 );
+    case XAsyncOp::DoWork:
+    {
+        if ( InterlockedCompareExchange( &context->canceled, 0, 0 ) ) return E_ABORT;
+        context->async = data->async;
+        InterlockedIncrement( &context->refs );
+        HANDLE thread = CreateThread( NULL, 0, mount_ui_worker, context, 0, NULL );
+        if ( !thread )
+        {
+            HRESULT hr = HRESULT_FROM_WIN32( GetLastError() );
+            mount_ui_release( context );
+            return hr;
+        }
+        CloseHandle( thread );
+        return E_PENDING;
+    }
+    case XAsyncOp::GetResult:
+        if ( !data->buffer || data->bufferSize < sizeof( context->mount ) || !context->mount ) return E_INVALIDARG;
+        memcpy( data->buffer, &context->mount, sizeof( context->mount ) );
+        context->mount = NULL;
+        return S_OK;
+    case XAsyncOp::Cancel:
+        InterlockedExchange( &context->canceled, TRUE );
+        if ( !InterlockedCompareExchange( &context->completed, 1, 0 ) )
+            context->threads->XAsyncComplete( data->async, E_ABORT, 0 );
+        return S_OK;
+    case XAsyncOp::Cleanup: mount_ui_release( context ); return S_OK;
+    default: return E_NOTIMPL;
+    }
+}
 HRESULT WINAPI XPackageImpl::XPackageMountWithUiAsync( const char *packageIdentifier, XAsyncBlock *async )
 {
-
-    return E_NOTIMPL;
+    if ( !async || !chunks_identifier( packageIdentifier ) ) return E_INVALIDARG;
+    auto context = new ( std::nothrow ) mount_ui_context;
+    if ( !context ) return E_OUTOFMEMORY;
+    memcpy( context->identifier, packageIdentifier, sizeof( context->identifier ) );
+    HRESULT hr = QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&context->threads );
+    if ( FAILED( hr ) ) { delete context; return hr; }
+    hr = context->threads->XAsyncBegin( async, context, &mount_ui_identity, "XPackageMountWithUiAsync", mount_ui_provider );
+    if ( FAILED( hr ) ) mount_ui_release( context );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageMountWithUiResult( XAsyncBlock *async, XPackageMountHandle *mount )
 {
-
-    return E_NOTIMPL;
+    if ( !async || !mount ) return E_INVALIDARG;
+    *mount = NULL;
+    IXThreadingImpl *threads = NULL;
+    HRESULT hr = QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&threads );
+    if ( SUCCEEDED( hr ) )
+    {
+        hr = threads->XAsyncGetResult( async, &mount_ui_identity, sizeof( *mount ), mount, NULL );
+        threads->Release();
+    }
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageEnumeratePackages3( XPackageKind kind, XPackageEnumerationScope scope,
