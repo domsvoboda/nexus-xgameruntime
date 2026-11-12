@@ -89,7 +89,8 @@ HRESULT WINAPI XStoreImpl::XStoreQueryEntitledProductsAsync( const XStoreContext
                                                              XStoreProductKind productKinds,
                                                              UINT32 maxItemsToRetrievePerPage, XAsyncBlock *async )
 {
-    return entitled_begin( storeContextHandle, static_cast<UINT32>( productKinds ), maxItemsToRetrievePerPage, async );
+    return entitled_begin( storeContextHandle, static_cast<UINT32>( productKinds ), maxItemsToRetrievePerPage, async,
+                           FALSE, FALSE, nullptr, TRUE );
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryEntitledProductsResult( XAsyncBlock *async,
@@ -101,7 +102,8 @@ HRESULT WINAPI XStoreImpl::XStoreQueryEntitledProductsResult( XAsyncBlock *async
 HRESULT WINAPI XStoreImpl::XStoreQueryProductForCurrentGameAsync( const XStoreContextHandle storeContextHandle,
                                                                   XAsyncBlock *async )
 {
-    HRESULT hr = entitled_begin( storeContextHandle, static_cast<UINT32>( XStoreProductKind::Game ), 1, async, FALSE, TRUE );
+    HRESULT hr = entitled_begin( storeContextHandle, static_cast<UINT32>( XStoreProductKind::Game ), 1, async, FALSE,
+                                 TRUE, nullptr, TRUE );
     NEXUS_STORE_META( 31, hr, 0, NULL );
     return hr;
 }
@@ -400,7 +402,7 @@ HRESULT WINAPI XStoreImpl::XStoreQueryLicenseTokenAsync( const XStoreContextHand
         if ( !productIds[i] || !*productIds[i] ) return E_INVALIDARG;
     if ( !( context = static_cast<std::remove_reference_t<decltype( context )>>( calloc( 1, sizeof( *context ) ) ) ) )
         return E_OUTOFMEMORY;
-    hr = xodus_store_license_body( productIds, productIdsCount, customDeveloperString, &context->request );
+    hr = xodus_store_license_body( productIds, productIdsCount, customDeveloperString, &context->request, FALSE );
     if ( FAILED( hr ) ) goto error;
     if ( FAILED( hr = QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&threading ) ) ) goto error;
     hr = ( threading )

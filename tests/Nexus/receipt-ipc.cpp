@@ -19,9 +19,9 @@ ULONGLONG WINAPI FixtureReceiptTick() { return RealReceiptTick() + clock_offset;
 UINT64 xuser_get_xuid(XUserHandle);
 static const char *GetStoreProductId() { return "B00000000001"; }
 static bool advance_after_body;
-static HRESULT FixtureBody(const char **ids, SIZE_T count, const char *nonce, char **out)
+static HRESULT FixtureBody(const char **ids, SIZE_T count, const char *nonce, char **out, BOOL include_collection_data)
 {
-    const auto hr = xodus_store_license_body(ids, count, nonce, out);
+    const auto hr = xodus_store_license_body(ids, count, nonce, out, include_collection_data);
     if (advance_after_body && SUCCEEDED(hr)) clock_offset = 119800;
     return hr;
 }
@@ -38,6 +38,13 @@ template<class Cancel, class Deadline> static HRESULT FixtureLicense(const char 
 static HRESULT FixtureLicense(const char *body, SIZE_T size, char **out)
 {
     return xodus_store_license_xml(body, size, out);
+}
+static HRESULT FixtureLicense(const char *body, SIZE_T size, char **out, LONG *cancel, ULONGLONG deadline,
+                              struct store_collection_metadata *metadata)
+{
+    if constexpr (requires { xodus_store_license_xml(body, size, out, cancel, deadline, metadata); })
+        return xodus_store_license_xml(body, size, out, cancel, deadline, metadata);
+    else return xodus_store_license_xml(body, size, out, cancel, deadline);
 }
 #define xodus_store_license_xml FixtureLicense
 #define xodus_store_license_body FixtureBody

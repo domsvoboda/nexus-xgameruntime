@@ -3,6 +3,7 @@
  * Included by xstore.c, sharing the component's SDK ABI and debug channel. */
 #include <stdint.h>
 #include <time.h>
+#include "CollectionMetadata.h"
 
 #define ENTITLED_MAX_PRODUCTS 257
 #define ENTITLED_MAX_SKUS 16
@@ -460,6 +461,26 @@ static HRESULT entitled_parse( const char *response, UINT16 size, struct entitle
                 goto done;
             }
             s->collectionData.endDate = value;
+            if ( entitled_child( sku_node, "AcquiredDate" ) )
+            {
+                if ( FAILED( hr = entitled_uint( sku_node, "AcquiredDate", &value ) ) ||
+                     value > ( UINT64 )time( NULL ) || value > INT64_MAX )
+                {
+                    hr = E_ACCESSDENIED;
+                    goto done;
+                }
+                s->collectionData.acquiredDate = value;
+            }
+            if ( entitled_child( sku_node, "StartDate" ) )
+            {
+                if ( FAILED( hr = entitled_uint( sku_node, "StartDate", &value ) ) ||
+                     value > ( UINT64 )time( NULL ) || value > INT64_MAX )
+                {
+                    hr = E_ACCESSDENIED;
+                    goto done;
+                }
+                s->collectionData.startDate = value;
+            }
             s->collectionData.isTrial = s->isTrial;
         }
     }
@@ -479,6 +500,7 @@ struct entitled_async
     LONG begin_active;
     DWORD begin_thread;
     BOOL game;
+    BOOL include_collection_data;
     XStoreContextHandle store;
     UINT64 store_serial, refresh;
     char *request;
@@ -521,7 +543,8 @@ static DWORD WINAPI entitled_worker( void *arg )
     HRESULT hr = E_ABORT;
     if ( !InterlockedCompareExchange( &context->canceled, 0, 0 ) )
         hr = context->fetch ? context->fetch( context->request, &context->canceled, &snapshot )
-                            : entitled_fetch( context->request, &context->canceled, &snapshot );
+                            : entitled_fetch( context->request, &context->canceled, &snapshot,
+                                              context->include_collection_data );
     if ( SUCCEEDED( hr ) )
     {
         if ( !context->fetch && !InterlockedCompareExchange( &context->canceled, 0, 0 ) )
@@ -661,7 +684,8 @@ static HRESULT entitled_start( struct entitled_async *context, XAsyncBlock *asyn
 }
 
 static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 page_size, XAsyncBlock *async,
-                               BOOL game = FALSE, BOOL current_only = FALSE, HANDLE drained = nullptr )
+                               BOOL game = FALSE, BOOL current_only = FALSE, HANDLE drained = nullptr,
+                               BOOL include_collection_data = FALSE )
 {
     struct entitled_async *context;
     xmlDocPtr doc;
@@ -728,6 +752,7 @@ static HRESULT entitled_begin( XStoreContextHandle store, UINT32 kinds, UINT32 p
     context->store_serial = serial;
     context->store = store;
     context->game = game;
+    context->include_collection_data = include_collection_data;
     context->refresh = InterlockedIncrement64( &entitled_next_refresh );
     return entitled_start( context, async, FALSE );
 }

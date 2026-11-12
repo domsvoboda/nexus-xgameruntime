@@ -24,6 +24,7 @@
 #include "User/OfflineIdentity.h"
 #include "../Runtime/Configuration.h"
 #include "../Runtime/TitleIdentityDiagnostics.h"
+#include "Store/CollectionMetadata.h"
 #include <afunix.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -290,7 +291,8 @@ HRESULT xodus_store_package_updates_xml( const char *request, SIZE_T request_siz
     return xodus_request( 9, request, request_size, response, size );
 }
 
-HRESULT xodus_store_license_body( const char **product_ids, SIZE_T count, const char *nonce, char **body )
+HRESULT xodus_store_license_body( const char **product_ids, SIZE_T count, const char *nonce, char **body,
+                                  BOOL include_collection_data )
 {
     xmlDocPtr doc;
     xmlNodePtr root;
@@ -312,6 +314,8 @@ HRESULT xodus_store_license_body( const char **product_ids, SIZE_T count, const 
     for ( i = 0; i < count; i++ )
         xmlNewTextChild( root, NULL, BAD_CAST "ProductId", BAD_CAST product_ids[i] );
     xmlNewTextChild( root, NULL, BAD_CAST "CustomDeveloperString", BAD_CAST nonce );
+    if ( include_collection_data )
+        xmlNewTextChild( root, NULL, BAD_CAST "IncludeCollectionData", BAD_CAST "true" );
     xmlDocDumpMemory( doc, &xml, &size );
     xmlFreeDoc( doc );
     if ( !xml ) return E_OUTOFMEMORY;
@@ -331,7 +335,8 @@ void xodus_store_license_note( const char *phase, HRESULT hr )
 }
 
 HRESULT xodus_store_license_xml( const char *request, SIZE_T request_size, char **token,
-                                LONG *canceled, ULONGLONG entitlement_deadline )
+                                LONG *canceled, ULONGLONG entitlement_deadline,
+                                struct store_collection_metadata *metadata )
 {
     char *response = NULL, *code = NULL, *end;
     UINT16 response_size = 0;
@@ -342,6 +347,7 @@ HRESULT xodus_store_license_xml( const char *request, SIZE_T request_size, char 
     DWORD timeout = 95000;
 
     *token = NULL;
+    if ( metadata ) memset( metadata, 0, sizeof( *metadata ) );
     if ( request_size > 0xffff || ( !request && request_size ) ) return E_INVALIDARG;
     if ( canceled && InterlockedCompareExchange( canceled, 0, 0 ) ) return E_ABORT;
     if ( entitlement_deadline )
@@ -381,6 +387,13 @@ HRESULT xodus_store_license_xml( const char *request, SIZE_T request_size, char 
             *token = NULL;
             hr = E_UNEXPECTED;
         }
+        else if ( metadata && FAILED( hr = store_collection_parse( root, metadata ) ) )
+        {
+            /* The genuine token is never published with a malformed adjunct. */
+            SecureZeroMemory( *token, strlen( *token ) );
+            free( *token );
+            *token = NULL;
+        }
     }
 cleanup:
     auth_metadata( "store-license", NULL, hr, 0, FALSE, FALSE );
@@ -395,6 +408,12 @@ cleanup:
 }
 
 // Direct token queries retain their original IPC budget and behavior.
+HRESULT xodus_store_license_xml( const char *request, SIZE_T request_size, char **token,
+                                LONG *canceled, ULONGLONG entitlement_deadline )
+{
+    return xodus_store_license_xml( request, request_size, token, canceled, entitlement_deadline, nullptr );
+}
+
 HRESULT xodus_store_license_xml( const char *request, SIZE_T request_size, char **token )
 {
     return xodus_store_license_xml( request, request_size, token, nullptr, 0 );

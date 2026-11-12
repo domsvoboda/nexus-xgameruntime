@@ -59,7 +59,8 @@ static ULONGLONG FixturePublicTick()
 {
     return metadata_mode ? metadata_ticks : GetTickCount64();
 }
-HRESULT xodus_store_license_body( const char **ids, SIZE_T count, const char *nonce, char **out )
+struct store_collection_metadata;
+HRESULT xodus_store_license_body( const char **ids, SIZE_T count, const char *nonce, char **out, BOOL )
 {
     if ( certificate_mode ) { certificate_nonce = nonce; certificate_nonces.emplace_back( nonce ); }
     *out = strdup( "synthetic" );
@@ -89,6 +90,11 @@ HRESULT xodus_store_license_xml( const char *request, SIZE_T size, char **out )
 HRESULT xodus_store_license_xml(const char *request, SIZE_T size, char **out, LONG *, ULONGLONG)
 {
     return xodus_store_license_xml(request, size, out);
+}
+HRESULT xodus_store_license_xml(const char *request, SIZE_T size, char **out, LONG *canceled,
+                                ULONGLONG deadline, struct store_collection_metadata *)
+{
+    return xodus_store_license_xml(request, size, out, canceled, deadline);
 }
 static const char *GetStoreProductId()
 {
@@ -3219,6 +3225,89 @@ done:
 }
 
 
+static std::string collection_item( const char *product, const char *sku, const char *acquired, const char *start,
+                                    const char *end )
+{
+    return std::string( "<Item><ProductId>" ) + product + "</ProductId><SkuId>" + sku + "</SkuId><AcquiredDate>" +
+           acquired + "</AcquiredDate><StartDate>" + start + "</StartDate><EndDate>" + end + "</EndDate></Item>";
+}
+static std::string collection_xml( const std::string &items )
+{
+    return std::string( "<StoreLicenseTokenResponse><Hresult>0</Hresult><Token>synthetic</Token>"
+                        "<CollectionMetadata>" ) +
+           items + "</CollectionMetadata></StoreLicenseTokenResponse>";
+}
+static HRESULT collection_parse_text( const char *text, struct store_collection_metadata *out )
+{
+    xmlDocPtr doc = xmlReadMemory( text, strlen( text ), NULL, NULL, XML_PARSE_NONET );
+    if ( !doc ) return E_UNEXPECTED;
+    HRESULT hr = store_collection_parse( xmlDocGetRootElement( doc ), out );
+    xmlFreeDoc( doc );
+    return hr;
+}
+static void test_collection_metadata()
+{
+    struct store_collection_metadata metadata = {};
+    const std::string real =
+        collection_xml( collection_item( "B00000000001", "0010", "1700000000", "1700000001", "4102444800" ) );
+    CHECK( "collection-real-shape", collection_parse_text( real.c_str(), &metadata ) == S_OK && metadata.count == 1 );
+    CHECK( "collection-int64-abi", metadata.items[0].acquired == 1700000000LL &&
+                                       metadata.items[0].start == 1700000001LL &&
+                                       metadata.items[0].end == 4102444800LL );
+    CHECK( "collection-absent-is-honest",
+           collection_parse_text( "<StoreLicenseTokenResponse><Hresult>0</Hresult><Token>synthetic</Token>"
+                                  "</StoreLicenseTokenResponse>",
+                                  &metadata ) == S_OK &&
+               metadata.count == 0 );
+    CHECK( "collection-missing-acquired",
+           collection_parse_text( collection_xml( "<Item><ProductId>B00000000001</ProductId><SkuId>0010</SkuId>"
+                                                  "<EndDate>4102444800</EndDate></Item>" ).c_str(),
+                                  &metadata ) == E_UNEXPECTED );
+    CHECK( "collection-malformed-acquired",
+           collection_parse_text( collection_xml( collection_item( "B00000000001", "0010", "not-a-date", "1700000001",
+                                                                  "4102444800" ) ).c_str(),
+                                  &metadata ) == E_UNEXPECTED );
+    CHECK( "collection-future-acquired",
+           collection_parse_text( collection_xml( collection_item( "B00000000001", "0010", "4102444800", "1700000001",
+                                                                  "4102444800" ) ).c_str(),
+                                  &metadata ) == E_UNEXPECTED );
+    CHECK( "collection-past-end",
+           collection_parse_text( collection_xml( collection_item( "B00000000001", "0010", "1700000000", "1700000001",
+                                                                  "1600000000" ) ).c_str(),
+                                  &metadata ) == E_UNEXPECTED );
+    CHECK( "collection-duplicate-sku",
+           collection_parse_text( collection_xml( collection_item( "B00000000001", "0010", "1700000000", "0",
+                                                                  "4102444800" ) +
+                                                  collection_item( "B00000000001", "0010", "1700000000", "0",
+                                                                  "4102444800" ) ).c_str(),
+                                  &metadata ) == E_UNEXPECTED );
+    CHECK( "collection-zero-start-is-absent",
+           collection_parse_text( collection_xml( collection_item( "B00000000001", "0010", "1700000000", "0",
+                                                                  "4102444800" ) ).c_str(),
+                                  &metadata ) == S_OK &&
+               metadata.count == 1 && !metadata.items[0].has_start );
+    {
+        struct receipt_license licenses[2] = {};
+        memcpy( licenses[0].id, "B00000000001", 13 );
+        memcpy( licenses[0].sku, "0010", 5 );
+        licenses[0].expiry = 1800000000;
+        memcpy( licenses[1].id, "B00000000002", 13 );
+        memcpy( licenses[1].sku, "0017", 5 );
+        const char *ids[] = { "B00000000001" };
+        const std::string joined =
+            collection_xml( collection_item( "B00000000001", "0010", "1700000000", "1700000001", "4102444800" ) +
+                            collection_item( "B00000000001", "0017", "1700000000", "1700000001", "4102444800" ) +
+                            collection_item( "B00000000002", "0017", "1700000000", "1700000001", "4102444800" ) );
+        CHECK( "collection-join-parse", collection_parse_text( joined.c_str(), &metadata ) == S_OK &&
+                                            metadata.count == 3 );
+        CHECK( "collection-join", receipt_apply_collection( &metadata, ids, 1, licenses, 2 ) == S_OK );
+        CHECK( "collection-join-exact", licenses[0].has_acquired && licenses[0].acquired == 1700000000LL &&
+                                            licenses[0].has_end && licenses[0].end == 4102444800LL );
+        CHECK( "collection-join-signed-expiry-unchanged", licenses[0].expiry == 1800000000 );
+        CHECK( "collection-join-unowned", !licenses[1].has_acquired && licenses[1].end == 0 );
+    }
+}
+
 int main( int argc, char **argv )
 {
     if ( argc == 2 && !strcmp( argv[1], "--dlc-inputs-only" ) )
@@ -3428,6 +3517,7 @@ int main( int argc, char **argv )
     test_public_catalog_async();
     test_related_hints();
     test_receipts();
+    test_collection_metadata();
     test_async( test_metadata() );
     test_gameaddon_kind();
     test_package_licenses();
