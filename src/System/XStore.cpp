@@ -159,6 +159,7 @@ HRESULT WINAPI XStoreImpl::XStoreAcquireLicenseForPackageAsync( const XStoreProd
                                                                 const char *packageIdentifier, XAsyncBlock *async )
 {
     HRESULT hr = package_license_begin( ( XStoreContextHandle )productQueryHandle, packageIdentifier, async );
+    xodus_store_license_note( "store-package-license-begin", hr );
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ACQUIRE_BEGIN, hr, 0 );
     return hr;
 }
@@ -185,6 +186,7 @@ HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForStoreIdAsync( const XStoreC
                                                                    const char *storeProductId, XAsyncBlock *async )
 {
     HRESULT hr = can_acquire_begin( storeContextHandle, storeProductId, async, &can_acquire_store_identity );
+    xodus_store_license_note( "store-can-acquire-store-begin", hr );
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_CAN_ACQUIRE_STORE_BEGIN, hr, 0 );
     return hr;
 }
@@ -201,6 +203,7 @@ HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForPackageAsync( const XStoreC
                                                                    const char *packageIdentifier, XAsyncBlock *async )
 {
     HRESULT hr = can_acquire_package_begin( storeContextHandle, packageIdentifier, async );
+    xodus_store_license_note( "store-can-acquire-package-begin", hr );
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_CAN_ACQUIRE_PACKAGE_BEGIN, hr, 0 );
     return hr;
 }
