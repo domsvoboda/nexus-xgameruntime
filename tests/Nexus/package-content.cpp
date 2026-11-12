@@ -1059,6 +1059,18 @@ int main( int argc, char **argv )
         printf( "CHECKS %u FAILURES %u\n", checks, failures );
         return failures ? 1 : 0;
     }
+    /* The deployed destination/host-source fixture is intentionally isolated
+     * from the auth/runtime DLL path: it exercises discovery, enumeration,
+     * chunk lookup and the private mount projection only. */
+    if ( argc == 2 && !strcmp( argv[1], "--deployed-destination-only" ) )
+    {
+        configure( main_config );
+        SetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", folder );
+        test_deployed_destination();
+        test_deployed_host_source();
+        printf( "CHECKS %u FAILURES %u\n", checks, failures );
+        return failures ? 1 : 0;
+    }
     helpers();
     actual_runtime( NULL );
     current_fixtures();

@@ -210,6 +210,16 @@ foreach(probe store-entitlements package-content store-context-cancellation rece
     set_target_properties(nexus_${probe} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endforeach()
 target_link_libraries(nexus_package-content PRIVATE xgameruntime-impl)
+# Bounded formatter/strict-flag fixture for the opt-in DLC diagnostic helper.
+# It has no XML, account, network or runtime dependency.
+add_executable(nexus_dlc-diagnostics Nexus/dlc-diagnostics.cpp)
+target_compile_features(nexus_dlc-diagnostics PRIVATE cxx_std_23)
+target_link_options(nexus_dlc-diagnostics PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_dlc-diagnostics PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(CMAKE_CROSSCOMPILING)
+    set_property(TARGET nexus_dlc-diagnostics PROPERTY CROSSCOMPILING_EMULATOR "${WINE_EXECUTABLE}")
+endif()
+add_test(NAME NexusDlcDiagnostics.Formatter COMMAND nexus_dlc-diagnostics)
 # Compile the real licensing helper against a fixture-only monotonic clock.
 # Its normal production object is never compiled with this forced include.
 target_sources(nexus_receipt-ipc PRIVATE "${PROJECT_SOURCE_DIR}/src/System/XUser.cpp")

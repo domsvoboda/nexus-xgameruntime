@@ -24,6 +24,7 @@
 #include "XStore.h"
 #include "XPackage.h"
 #include "../Runtime/Configuration.h"
+#include "../Runtime/DlcDiagnostics.h"
 #include "Store/Bridge.h"
 #include <mutex>
 
@@ -55,6 +56,7 @@ HRESULT WINAPI XStoreImpl::XStoreQueryAssociatedProductsAsync( const XStoreConte
 {
     HRESULT hr = associated_begin( storeContextHandle, NULL, static_cast<UINT32>( productKinds ),
                                    maxItemsToRetrievePerPage, async, &associated_identity );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ASSOCIATED_BEGIN, hr, 0 );
     NEXUS_STORE_META( 32, hr, 0, NULL );
     return hr;
 }
@@ -62,7 +64,9 @@ HRESULT WINAPI XStoreImpl::XStoreQueryAssociatedProductsAsync( const XStoreConte
 HRESULT WINAPI XStoreImpl::XStoreQueryAssociatedProductsResult( XAsyncBlock *async,
                                                                 XStoreProductQueryHandle *productQueryHandle )
 {
-    return catalog_result( async, productQueryHandle, &associated_identity );
+    HRESULT hr = catalog_result( async, productQueryHandle, &associated_identity );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ASSOCIATED_RESULT, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryProductsAsync( const XStoreContextHandle storeContextHandle,
@@ -152,13 +156,17 @@ void WINAPI XStoreImpl::XStoreCloseProductsQueryHandle( XStoreProductQueryHandle
 HRESULT WINAPI XStoreImpl::XStoreAcquireLicenseForPackageAsync( const XStoreProductQueryHandle productQueryHandle,
                                                                 const char *packageIdentifier, XAsyncBlock *async )
 {
-    return package_license_begin( ( XStoreContextHandle )productQueryHandle, packageIdentifier, async );
+    HRESULT hr = package_license_begin( ( XStoreContextHandle )productQueryHandle, packageIdentifier, async );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ACQUIRE_BEGIN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreAcquireLicenseForPackageResult( XAsyncBlock *async,
                                                                  XStoreLicenseHandle *storeLicenseHandle )
 {
-    return package_license_result( async, storeLicenseHandle );
+    HRESULT hr = package_license_result( async, storeLicenseHandle );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ACQUIRE_RESULT, hr, 0 );
+    return hr;
 }
 
 BOOLEAN WINAPI XStoreImpl::XStoreIsLicenseValid( const XStoreLicenseHandle storeLicenseHandle )
@@ -174,25 +182,33 @@ void WINAPI XStoreImpl::XStoreCloseLicenseHandle( XStoreLicenseHandle storeLicen
 HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForStoreIdAsync( const XStoreContextHandle storeContextHandle,
                                                                    const char *storeProductId, XAsyncBlock *async )
 {
-    return can_acquire_begin( storeContextHandle, storeProductId, async, &can_acquire_store_identity );
+    HRESULT hr = can_acquire_begin( storeContextHandle, storeProductId, async, &can_acquire_store_identity );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_CAN_ACQUIRE_STORE_BEGIN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForStoreIdResult(
     XAsyncBlock *async, XStoreCanAcquireLicenseResult *storeCanAcquireLicense )
 {
-    return can_acquire_result( async, storeCanAcquireLicense, &can_acquire_store_identity );
+    HRESULT hr = can_acquire_result( async, storeCanAcquireLicense, &can_acquire_store_identity );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_CAN_ACQUIRE_STORE_RESULT, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForPackageAsync( const XStoreContextHandle storeContextHandle,
                                                                    const char *packageIdentifier, XAsyncBlock *async )
 {
-    return can_acquire_package_begin( storeContextHandle, packageIdentifier, async );
+    HRESULT hr = can_acquire_package_begin( storeContextHandle, packageIdentifier, async );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_CAN_ACQUIRE_PACKAGE_BEGIN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreCanAcquireLicenseForPackageResult(
     XAsyncBlock *async, XStoreCanAcquireLicenseResult *storeCanAcquireLicense )
 {
-    return can_acquire_result( async, storeCanAcquireLicense, &can_acquire_package_identity );
+    HRESULT hr = can_acquire_result( async, storeCanAcquireLicense, &can_acquire_package_identity );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_CAN_ACQUIRE_PACKAGE_RESULT, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryGameLicenseAsync( const XStoreContextHandle store, XAsyncBlock *async )
@@ -215,18 +231,24 @@ HRESULT WINAPI XStoreImpl::XStoreQueryGameLicenseResult( XAsyncBlock *async, XSt
 HRESULT WINAPI XStoreImpl::XStoreQueryAddOnLicensesAsync( const XStoreContextHandle storeContextHandle,
                                                           XAsyncBlock *async )
 {
-    return addon_license_begin( storeContextHandle, async );
+    HRESULT hr = addon_license_begin( storeContextHandle, async );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ADDON_BEGIN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryAddOnLicensesResultCount( XAsyncBlock *async, UINT32 *count )
 {
-    return addon_license_count( async, count );
+    HRESULT hr = addon_license_count( async, count );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ADDON_COUNT, hr, SUCCEEDED( hr ) && count ? *count : 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryAddOnLicensesResult( XAsyncBlock *async, UINT32 count,
                                                            XStoreAddonLicense *addOnLicenses )
 {
-    return addon_license_result( async, count, addOnLicenses );
+    HRESULT hr = addon_license_result( async, count, addOnLicenses );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ADDON_RESULT, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XStoreImpl::XStoreQueryConsumableBalanceRemainingAsync( const XStoreContextHandle storeContextHandle,

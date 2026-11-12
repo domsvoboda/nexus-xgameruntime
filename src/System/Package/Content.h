@@ -4,6 +4,7 @@
  * independent. Shared by the C++ package provider. */
 #include <libxml/parser.h>
 #include <libxml/tree.h>
+#include "../../Runtime/DlcDiagnostics.h"
 
 #define CONTENT_MAX_PACKAGES 128
 #define CONTENT_MAX_DIRECTORIES 512
@@ -94,7 +95,7 @@ struct content_snapshot
 {
     struct content_game current;
     struct content_package packages[CONTENT_MAX_PACKAGES];
-    UINT32 count, directories;
+    UINT32 count, directories, content_count, load_failures;
 };
 
 static BOOL content_join( const WCHAR *root, const WCHAR *name, WCHAR *out )
@@ -479,11 +480,16 @@ static BOOL content_layout_coordinate( const WCHAR *root, xmlNodePtr node,
                                        enum content_layout_coordinate *coordinate, UINT *groups )
 {
     UINT declared = 0, visited = 0;
-    if ( !content_layout_declarations( node, 0, &declared ) || !declared ) return FALSE;
+    if ( !content_layout_declarations( node, 0, &declared ) || !declared )
+    {
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_INVALID, E_INVALIDARG, declared );
+        return FALSE;
+    }
     if ( content_layout_files( root, node, 0, &visited, CONTENT_LAYOUT_DESTINATION ) && visited )
     {
         *coordinate = CONTENT_LAYOUT_DESTINATION;
         if ( groups ) *groups = visited;
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_DESTINATION, S_OK, visited );
         return TRUE;
     }
     visited = 0;
@@ -491,8 +497,10 @@ static BOOL content_layout_coordinate( const WCHAR *root, xmlNodePtr node,
     {
         *coordinate = CONTENT_LAYOUT_SOURCE;
         if ( groups ) *groups = visited;
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_SOURCE, S_OK, visited );
         return TRUE;
     }
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_NONE, HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND ), declared );
     return FALSE;
 }
 
@@ -618,7 +626,14 @@ static HRESULT content_add( struct content_snapshot *snapshot, const WCHAR *path
             return HRESULT_FROM_WIN32( ERROR_MORE_DATA );
         }
         snapshot->packages[snapshot->count++] = *package;
+        if ( package->content )
+        {
+            ++snapshot->content_count;
+            nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LOAD_ACCEPTED, S_OK, snapshot->content_count );
+        }
     }
+    else
+        ++snapshot->load_failures;
     free( package );
     return S_OK;
 }
@@ -683,17 +698,25 @@ static HRESULT content_discover( struct content_snapshot *snapshot )
             *sep = 0;
         }
     }
-    if ( FAILED( hr ) ) return hr;
+    if ( FAILED( hr ) ) goto done;
     length = GetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", NULL, 0 );
-    if ( !length ) return S_OK;
-    if ( length > 32768 ) return E_INVALIDARG;
+    if ( !length ) goto done;
+    if ( length > 32768 )
+    {
+        hr = E_INVALIDARG;
+        goto done;
+    }
     if ( !( roots = static_cast<std::remove_reference_t<decltype( roots )>>( malloc( length * sizeof( *roots ) ) ) ) )
-        return E_OUTOFMEMORY;
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
     roots[0] = 0;
     if ( GetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", roots, length ) >= length )
     {
         free( roots );
-        return E_INVALIDARG;
+        hr = E_INVALIDARG;
+        goto done;
     }
     for ( sep = roots, i = 0; sep && *sep; sep = next )
     {
@@ -707,6 +730,10 @@ static HRESULT content_discover( struct content_snapshot *snapshot )
         if ( FAILED( hr = content_scan( snapshot, sep ) ) ) break;
     }
     free( roots );
+done:
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_DISCOVER_ACCEPTED, hr, snapshot->content_count );
+    if ( snapshot->load_failures )
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_DISCOVER_REJECTED, hr, snapshot->load_failures );
     return hr;
 }
 
@@ -760,6 +787,7 @@ static HRESULT enumerate_content_packages( XPackageEnumerationScope scope, void 
     {
         for ( i = 0; i < snapshot->count; i++ )
             if ( content_matches( snapshot, &snapshot->packages[i], scope ) ) count++;
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_MATCHES, S_OK, count );
         for ( i = 0; i < snapshot->count; i++ )
         {
             const struct content_package *package = &snapshot->packages[i];
