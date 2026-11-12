@@ -521,7 +521,7 @@ static HRESULT catalog_fetch ( const char *request, LONG *canceled, entitled_sna
     if ( SUCCEEDED ( hr ) && InterlockedCompareExchange ( canceled, 0, 0 ) )
         hr = E_ABORT;
     if ( SUCCEEDED ( hr ) )
-        hr = entitled_fetch ( request, canceled, &owned );
+        hr = entitled_fetch ( request, canceled, &owned, TRUE );
     if ( SUCCEEDED ( hr ) )
         hr = catalog_join_collection ( catalog, owned );
     if ( SUCCEEDED ( hr ) )

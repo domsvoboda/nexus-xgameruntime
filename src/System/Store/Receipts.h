@@ -365,7 +365,38 @@ struct receipt_license
 {
     char id[13], sku[5];
     UINT64 expiry;
+    /* Optional first-party collection timestamps, joined only after the signed
+     * receipt verified and this exact product/SKU was admitted to inventory. */
+    INT64 acquired, start, end;
+    BOOL has_acquired, has_start, has_end;
 };
+
+/* Apply optional collection metadata only to exact product/SKU rows already
+ * proven by the verified signed receipt. Unmatched rows grant nothing. */
+static HRESULT receipt_apply_collection( const struct store_collection_metadata *metadata, const char **ids,
+                                         UINT32 count, struct receipt_license *licenses, UINT32 license_count )
+{
+    UINT32 i, j;
+    if ( !metadata ) return S_OK;
+    for ( i = 0; i < metadata->count; i++ )
+    {
+        const struct store_collection_item *item = &metadata->items[i];
+        for ( j = 0; j < count && strcmp( ids[j], item->product ); j++ )
+            ;
+        if ( j == count ) continue;
+        for ( j = 0; j < license_count; j++ )
+            if ( !strcmp( licenses[j].id, item->product ) && !strcmp( licenses[j].sku, item->sku ) )
+                break;
+        if ( j == license_count ) continue;
+        licenses[j].acquired = item->acquired;
+        licenses[j].start = item->start;
+        licenses[j].end = item->end;
+        licenses[j].has_acquired = item->has_acquired;
+        licenses[j].has_start = item->has_start;
+        licenses[j].has_end = item->has_end;
+    }
+    return S_OK;
+}
 
 static HRESULT receipt_inventory( IJsonObject *claim, const char **ids, UINT32 count, struct receipt_license *licenses,
                                   UINT32 *license_count, UINT64 *expiry )
@@ -408,6 +439,7 @@ static HRESULT receipt_inventory( IJsonObject *claim, const char **ids, UINT32 c
                 }
                 else if ( *license_count < ENTITLED_MAX_PRODUCTS )
                 {
+                    memset( &licenses[*license_count], 0, sizeof( licenses[*license_count] ) );
                     memcpy( licenses[*license_count].id, product, 13 );
                     memcpy( licenses[*license_count].sku, sku, 5 );
                     licenses[( *license_count )++].expiry = until;
@@ -438,7 +470,7 @@ static HRESULT receipt_metadata_parse( struct receipt_license *license, UINT32 k
     UINT32 kind = 0, count, i;
     boolean trial = FALSE;
     xmlNodePtr node, sku_node;
-    char kind_text[8], expiry_text[32];
+    char kind_text[8], expiry_text[32], acquired_text[32], start_text[32];
     HRESULT hr = E_UNEXPECTED;
     if ( FAILED( receipt_json( bytes, size, &document ) ) ||
          FAILED( receipt_get_array( document, L"Products", &products ) ) ||
@@ -549,8 +581,19 @@ static HRESULT receipt_metadata_parse( struct receipt_license *license, UINT32 k
     xmlNewTextChild( sku_node, NULL, BAD_CAST "Language", BAD_CAST lang );
     xmlNewTextChild( sku_node, NULL, BAD_CAST "IsTrial", BAD_CAST( trial ? "true" : "false" ) );
     xmlNewTextChild( sku_node, NULL, BAD_CAST "IsInUserCollection", BAD_CAST "true" );
-    snprintf( expiry_text, sizeof( expiry_text ), "%llu", ( unsigned long long )license->expiry );
+    snprintf( expiry_text, sizeof( expiry_text ), "%llu",
+              ( unsigned long long )( license->has_end ? ( UINT64 )license->end : license->expiry ) );
     xmlNewTextChild( sku_node, NULL, BAD_CAST "EndDate", BAD_CAST expiry_text );
+    if ( license->has_acquired )
+    {
+        snprintf( acquired_text, sizeof( acquired_text ), "%lld", ( long long )license->acquired );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "AcquiredDate", BAD_CAST acquired_text );
+    }
+    if ( license->has_start )
+    {
+        snprintf( start_text, sizeof( start_text ), "%lld", ( long long )license->start );
+        xmlNewTextChild( sku_node, NULL, BAD_CAST "StartDate", BAD_CAST start_text );
+    }
     hr = S_OK;
 done:
     if ( document ) ( document )->Release();
@@ -609,7 +652,8 @@ static HRESULT receipt_metadata_rows( struct receipt_license *licenses, UINT32 l
     return hr;
 }
 
-static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entitled_snapshot **out )
+static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entitled_snapshot **out,
+                               BOOL include_collection_data = FALSE )
 {
     xmlDocPtr doc = NULL, result = NULL;
     xmlNodePtr root, node, response_root;
@@ -651,6 +695,7 @@ static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entit
         char nonce[65], *body = NULL, *jwt = NULL;
         IJsonObject *claim = NULL;
         UINT64 token_expiry = 0;
+        struct store_collection_metadata collection = {};
         if ( InterlockedCompareExchange( canceled, 0, 0 ) )
         {
             hr = E_ABORT;
@@ -669,8 +714,14 @@ static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entit
         for ( j = 0; j < 32; j++ )
             sprintf( nonce + j * 2, "%02x", random[j] );
         hr = xodus_store_license_body( ( const char ** )&ids[batch], std::min<UINT32>( 64, count - batch ), nonce,
-                                       &body );
-        if ( SUCCEEDED( hr ) ) hr = xodus_store_license_xml( body, strlen( body ), &jwt, canceled, deadline );
+                                       &body, include_collection_data );
+        if ( SUCCEEDED( hr ) )
+        {
+            if ( include_collection_data )
+                hr = xodus_store_license_xml( body, strlen( body ), &jwt, canceled, deadline, &collection );
+            else
+                hr = xodus_store_license_xml( body, strlen( body ), &jwt, canceled, deadline );
+        }
         free( body );
         if ( SUCCEEDED( hr ) && InterlockedCompareExchange( canceled, 0, 0 ) ) hr = E_ABORT;
         if ( SUCCEEDED( hr ) ) hr = receipt_load( jwt, nonce, &claim, &token_expiry, &certificate_cache );
@@ -684,6 +735,8 @@ static HRESULT entitled_fetch( const char *request, LONG *canceled, struct entit
         {
             if ( token_expiry < expiry ) expiry = token_expiry;
             hr = receipt_inventory( claim, ( const char ** )ids, count, licenses, &license_count, &expiry );
+            if ( SUCCEEDED( hr ) && include_collection_data )
+                hr = receipt_apply_collection( &collection, ( const char ** )ids, count, licenses, license_count );
             xodus_store_license_note( "store-entitled-inventory", hr );
         }
         if ( claim ) ( claim )->Release();

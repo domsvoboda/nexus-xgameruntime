@@ -21,6 +21,7 @@
 
 #include "XPackage.h"
 #include "../Runtime/Configuration.h"
+#include "../Runtime/DlcDiagnostics.h"
 #include <mutex>
 #include <string.h>
 
@@ -330,7 +331,10 @@ HRESULT WINAPI XPackageImpl::XPackageEnumeratePackagesLegacy( XPackageKind kind,
                                                               void *context, XPackageEnumerationCallback *callback )
 {
 
-    return enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_LEGACY_ENTRY, S_OK, 0 );
+    HRESULT hr = enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_LEGACY_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalledLegacy( XTaskQueueHandle queue, void *context,
@@ -350,7 +354,10 @@ BOOLEAN WINAPI XPackageImpl::XPackageUnregisterPackageInstalled( XTaskQueueRegis
 HRESULT WINAPI XPackageImpl::XPackageMountLegacy( const char *identifier, XPackageMountHandle *mount )
 {
 
-    return package_mount_legacy( identifier, mount );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_LEGACY_ENTRY, S_OK, 0 );
+    HRESULT hr = package_mount_legacy( identifier, mount );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_LEGACY_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageGetMountPathSize( XPackageMountHandle mount, SIZE_T *pathSize )
@@ -493,7 +500,10 @@ HRESULT WINAPI XPackageImpl::XPackageEnumeratePackages( XPackageKind kind, XPack
                                                         void *context, XPackageEnumerationCallback *callback )
 {
 
-    return enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_CURRENT_ENTRY, S_OK, 0 );
+    HRESULT hr = enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_CURRENT_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT xpackage_query_identifier( const char *requested_store, SIZE_T size, char *identifier )
@@ -560,7 +570,10 @@ HRESULT WINAPI XPackageImpl::XPackageEnumeratePackages2( XPackageKind kind, XPac
                                                          void *context, XPackageEnumerationCallback *callback )
 {
 
-    return enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_2_ENTRY, S_OK, 0 );
+    HRESULT hr = enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_2_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalled2( XTaskQueueHandle queue, void *context,
@@ -574,20 +587,29 @@ HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalled2( XTaskQueueHandle
 HRESULT WINAPI XPackageImpl::XPackageMountWithUiAsync( const char *packageIdentifier, XAsyncBlock *async )
 {
 
-    return E_NOTIMPL;
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_ASYNC_ENTRY, S_OK, 0 );
+    HRESULT hr = E_NOTIMPL;
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_ASYNC_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageMountWithUiResult( XAsyncBlock *async, XPackageMountHandle *mount )
 {
 
-    return E_NOTIMPL;
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_RESULT_ENTRY, S_OK, 0 );
+    HRESULT hr = E_NOTIMPL;
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_RESULT_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageEnumeratePackages3( XPackageKind kind, XPackageEnumerationScope scope,
                                                          void *context, XPackageEnumerationCallback *callback )
 {
 
-    return enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_3_ENTRY, S_OK, 0 );
+    HRESULT hr = enumerate_current_package( kind, scope, context, callback );
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_3_RETURN, hr, 0 );
+    return hr;
 }
 
 HRESULT WINAPI XPackageImpl::XPackageRegisterPackageInstalled3( XTaskQueueHandle queue, void *context,

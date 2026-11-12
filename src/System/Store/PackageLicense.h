@@ -439,6 +439,20 @@ static HRESULT package_license_begin( XStoreContextHandle store, const char *ide
     context->store_serial = serial;
     if ( FAILED( hr = xpackage_query_content_store( identifier, sizeof( context->store ), context->store ) ) )
     {
+        /* Passive classification only. Keep the original lookup result. */
+        DWORD saved_error = GetLastError();
+        IXPackageImpl *package = NULL;
+        char current[33] = {};
+        HRESULT current_hr = QueryApiImpl( CLSID_XPackageImpl, IID_IXPackageImpl, (void **)&package );
+        if ( SUCCEEDED( current_hr ) )
+        {
+            current_hr = package->XPackageGetCurrentProcessPackageIdentifier( sizeof( current ), current );
+            package->Release();
+        }
+        xodus_store_license_note( "store-package-current-id-query", current_hr );
+        if ( SUCCEEDED( current_hr ) )
+            xodus_store_license_note( "store-package-current-id-match", !strcmp( current, identifier ) ? S_OK : S_FALSE );
+        SetLastError( saved_error );
         free( context );
         return hr;
     }

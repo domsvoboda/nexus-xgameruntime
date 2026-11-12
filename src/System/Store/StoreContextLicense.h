@@ -72,6 +72,7 @@ static HRESULT query_game_license( XStoreGameLicense *out, const std::atomic<boo
     entitled_store_close( store );
     if ( SUCCEEDED( hr ) && !out->isActive ) hr = E_ACCESSDENIED;
     if ( FAILED( hr ) ) *out = {};
+    xodus_store_license_note( "store-winrt-game-license-result", hr );
     return hr;
 }
 /* Use the same account-backed, signed-receipt enumeration as XStore. The

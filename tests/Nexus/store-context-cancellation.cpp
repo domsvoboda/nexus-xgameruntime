@@ -29,7 +29,8 @@ const GameConfiguration *GetGameConfiguration() noexcept { static GameConfigurat
 }
 UINT64 xuser_get_xuid(XUserHandle) { return 1; }
 static const char *GetStoreProductId() { return store_id; }
-HRESULT xodus_store_license_body(const char **, SIZE_T, const char *, char **out)
+struct store_collection_metadata;
+HRESULT xodus_store_license_body(const char **, SIZE_T, const char *, char **out, BOOL)
 {
     *out = strdup("synthetic"); return *out ? S_OK : E_OUTOFMEMORY;
 }
@@ -44,6 +45,11 @@ HRESULT xodus_store_license_xml(const char *, SIZE_T, char **out)
 HRESULT xodus_store_license_xml(const char *request, SIZE_T size, char **out, LONG *, ULONGLONG)
 {
     return xodus_store_license_xml(request, size, out);
+}
+HRESULT xodus_store_license_xml(const char *request, SIZE_T size, char **out, LONG *canceled,
+                                ULONGLONG deadline, struct store_collection_metadata *)
+{
+    return xodus_store_license_xml(request, size, out, canceled, deadline);
 }
 void xodus_store_license_note(const char *phase, HRESULT hr)
 {

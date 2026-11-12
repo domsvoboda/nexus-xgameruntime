@@ -4,6 +4,7 @@
  * independent. Shared by the C++ package provider. */
 #include <libxml/parser.h>
 #include <libxml/tree.h>
+#include "../../Runtime/DlcDiagnostics.h"
 
 #define CONTENT_MAX_PACKAGES 128
 #define CONTENT_MAX_DIRECTORIES 512
@@ -94,7 +95,7 @@ struct content_snapshot
 {
     struct content_game current;
     struct content_package packages[CONTENT_MAX_PACKAGES];
-    UINT32 count, directories;
+    UINT32 count, directories, content_count, load_failures;
 };
 
 static BOOL content_join( const WCHAR *root, const WCHAR *name, WCHAR *out )
@@ -276,6 +277,38 @@ static BOOL content_layout_location( xmlNodePtr node, const char *attribute, cha
     return TRUE;
 }
 
+/* A SourcePath that names an absolute build-machine coordinate is installation
+ * metadata, not package content: it is never opened, resolved or joined to the
+ * extracted root. Such a declaration is opaque and only usable when a separate,
+ * explicit DestinationPath selects the deployed tree for the whole package.
+ * Drive-relative "D:build" is not absolute, so it stays rejected; a single
+ * leading separator remains package-relative. Control and wildcard bytes are
+ * never accepted in any SourcePath. */
+static BOOL content_host_source( const char *text )
+{
+    const char *p;
+    BOOL drive, network;
+    if ( !text || !*text ) return FALSE;
+    for ( p = text; *p; ++p )
+        if ( ( unsigned char )*p < 32 || *p == '*' || *p == '?' ) return FALSE;
+    drive = ( ( text[0] >= 'A' && text[0] <= 'Z' ) || ( text[0] >= 'a' && text[0] <= 'z' ) ) &&
+            text[1] == ':' && ( text[2] == '\\' || text[2] == '/' );
+    network = ( text[0] == '\\' || text[0] == '/' ) && ( text[1] == '\\' || text[1] == '/' ) &&
+              text[2] && text[2] != '\\' && text[2] != '/';
+    return drive || network;
+}
+
+/* A host SourcePath is accepted as a declaration only alongside a destination,
+ * and never becomes a filesystem coordinate. Relative sources keep all package
+ * component rules. */
+static BOOL content_layout_source( xmlNodePtr node, BOOL destination )
+{
+    char value[MAX_PATH];
+    if ( !content_text( node, "SourcePath", value, sizeof( value ) ) ) return FALSE;
+    if ( content_host_source( value ) ) return destination;
+    return content_layout_location( node, "SourcePath", value, sizeof( value ) );
+}
+
 /* Include may carry one literal directory prefix; wildcards are leaf-only. */
 static BOOL content_include_parts( const char *include, char *prefix, SIZE_T size, const char **leaf )
 {
@@ -336,7 +369,9 @@ enum content_layout_coordinate
 };
 
 /* Validate every declared declaration before any tree is inspected, so an
- * invalid path cannot hide behind the other coordinate. */
+ * invalid path cannot hide behind the other coordinate. An opaque absolute
+ * build SourcePath is accepted only with an explicit destination; the deployed
+ * destination coordinate is still the only one that can then resolve files. */
 static BOOL content_layout_declarations( xmlNodePtr node, UINT depth, UINT *groups )
 {
     char include[MAX_PATH], prefix[MAX_PATH];
@@ -354,8 +389,8 @@ static BOOL content_layout_declarations( xmlNodePtr node, UINT depth, UINT *grou
                  !content_text( node, "Include", include, sizeof( include ) ) ||
                  !content_relative( include, TRUE ) ||
                  !content_include_parts( include, prefix, sizeof( prefix ), &leaf ) || !*leaf ||
-                 ( source && !content_layout_location( node, "SourcePath", prefix, sizeof( prefix ) ) ) ||
-                 ( destination && !content_layout_location( node, "DestinationPath", prefix, sizeof( prefix ) ) ) )
+                 ( destination && !content_layout_location( node, "DestinationPath", prefix, sizeof( prefix ) ) ) ||
+                 ( source && !content_layout_source( node, destination ) ) )
                 return FALSE;
         }
         if ( !content_layout_declarations( node->children, depth + 1, groups ) ) return FALSE;
@@ -445,11 +480,16 @@ static BOOL content_layout_coordinate( const WCHAR *root, xmlNodePtr node,
                                        enum content_layout_coordinate *coordinate, UINT *groups )
 {
     UINT declared = 0, visited = 0;
-    if ( !content_layout_declarations( node, 0, &declared ) || !declared ) return FALSE;
+    if ( !content_layout_declarations( node, 0, &declared ) || !declared )
+    {
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_INVALID, E_INVALIDARG, declared );
+        return FALSE;
+    }
     if ( content_layout_files( root, node, 0, &visited, CONTENT_LAYOUT_DESTINATION ) && visited )
     {
         *coordinate = CONTENT_LAYOUT_DESTINATION;
         if ( groups ) *groups = visited;
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_DESTINATION, S_OK, visited );
         return TRUE;
     }
     visited = 0;
@@ -457,8 +497,10 @@ static BOOL content_layout_coordinate( const WCHAR *root, xmlNodePtr node,
     {
         *coordinate = CONTENT_LAYOUT_SOURCE;
         if ( groups ) *groups = visited;
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_SOURCE, S_OK, visited );
         return TRUE;
     }
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LAYOUT_NONE, HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND ), declared );
     return FALSE;
 }
 
@@ -584,7 +626,14 @@ static HRESULT content_add( struct content_snapshot *snapshot, const WCHAR *path
             return HRESULT_FROM_WIN32( ERROR_MORE_DATA );
         }
         snapshot->packages[snapshot->count++] = *package;
+        if ( package->content )
+        {
+            ++snapshot->content_count;
+            nexus_dlc_diagnostic( NEXUS_DLC_STAGE_LOAD_ACCEPTED, S_OK, snapshot->content_count );
+        }
     }
+    else
+        ++snapshot->load_failures;
     free( package );
     return S_OK;
 }
@@ -649,17 +698,25 @@ static HRESULT content_discover( struct content_snapshot *snapshot )
             *sep = 0;
         }
     }
-    if ( FAILED( hr ) ) return hr;
+    if ( FAILED( hr ) ) goto done;
     length = GetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", NULL, 0 );
-    if ( !length ) return S_OK;
-    if ( length > 32768 ) return E_INVALIDARG;
+    if ( !length ) goto done;
+    if ( length > 32768 )
+    {
+        hr = E_INVALIDARG;
+        goto done;
+    }
     if ( !( roots = static_cast<std::remove_reference_t<decltype( roots )>>( malloc( length * sizeof( *roots ) ) ) ) )
-        return E_OUTOFMEMORY;
+    {
+        hr = E_OUTOFMEMORY;
+        goto done;
+    }
     roots[0] = 0;
     if ( GetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", roots, length ) >= length )
     {
         free( roots );
-        return E_INVALIDARG;
+        hr = E_INVALIDARG;
+        goto done;
     }
     for ( sep = roots, i = 0; sep && *sep; sep = next )
     {
@@ -673,6 +730,10 @@ static HRESULT content_discover( struct content_snapshot *snapshot )
         if ( FAILED( hr = content_scan( snapshot, sep ) ) ) break;
     }
     free( roots );
+done:
+    nexus_dlc_diagnostic( NEXUS_DLC_STAGE_DISCOVER_ACCEPTED, hr, snapshot->content_count );
+    if ( snapshot->load_failures )
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_DISCOVER_REJECTED, hr, snapshot->load_failures );
     return hr;
 }
 
@@ -726,6 +787,7 @@ static HRESULT enumerate_content_packages( XPackageEnumerationScope scope, void 
     {
         for ( i = 0; i < snapshot->count; i++ )
             if ( content_matches( snapshot, &snapshot->packages[i], scope ) ) count++;
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_ENUM_MATCHES, S_OK, count );
         for ( i = 0; i < snapshot->count; i++ )
         {
             const struct content_package *package = &snapshot->packages[i];
