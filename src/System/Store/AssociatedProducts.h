@@ -339,7 +339,7 @@ static HRESULT associated_fetch( const char *request, LONG *canceled, struct ent
             hr = E_UNEXPECTED;
             goto done;
         }
-        hr = entitled_fetch( (char *)license_bytes, canceled, &owned );
+        hr = entitled_fetch( (char *)license_bytes, canceled, &owned, TRUE );
         xmlFree( license_bytes );
         if ( FAILED( hr ) ) goto done;
         if ( FAILED( hr = catalog_join_collection( catalog, owned ) ) ) goto done;

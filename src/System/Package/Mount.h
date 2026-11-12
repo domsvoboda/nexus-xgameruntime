@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <xstore.h>
+#include "../../Runtime/DlcDiagnostics.h"
 
 struct package_mount_file
 {
@@ -500,6 +501,8 @@ static HRESULT package_mount_create( const content_package &package, package_mou
     {
         package_mount_plan plan;
         HRESULT hr = package_mount_read_plan( package, plan );
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_PLAN_GROUPS, hr, plan.groups );
+        nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_PLAN_FILES, hr, ( UINT32 )plan.files.size() );
         if ( FAILED( hr ) )
             return hr;
         WCHAR temporary[MAX_PATH], name[64];

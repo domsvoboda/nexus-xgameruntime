@@ -25,7 +25,7 @@ test('StoreContext uses the existing receipt transport without a stale global li
 });
 test('current-game query omits related product hints and keeps verified enumeration',()=>{
  const query=read('src/System/XStore.cpp').split('XStoreQueryProductForCurrentGameAsync')[1].split('XStoreQueryProductForCurrentGameResult')[0];
- assert.match(query,/entitled_begin\([^;]*FALSE, TRUE \)/);
+ assert.match(query,/entitled_begin\([^;]*FALSE,\s*TRUE(?:, nullptr, TRUE)? \)/);
  assert.match(read('src/System/Store/Entitled.h'),/!current_only && i < entitled_related_count/);
 });
 test('both ABI export lists and account-free native gates include StoreContext',()=>{
