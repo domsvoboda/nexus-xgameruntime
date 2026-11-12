@@ -703,6 +703,7 @@ static void test_mount_exclude()
  * without falling back to the build-machine SourcePath. */
 static void test_deployed_destination()
 {
+    configure( main_config );
     WCHAR root[MAX_PATH], layout[MAX_PATH], file[MAX_PATH], nested[MAX_PATH], workspace[MAX_PATH], staging[MAX_PATH];
     content_package package{};
     package_mount_plan plan;
@@ -866,6 +867,180 @@ static void test_deployed_destination()
     DeleteFileW( layout );
 }
 
+/* Report 584: an extracted addon layout may retain an absolute build-machine
+ * SourcePath. That coordinate is opaque installation metadata and must never be
+ * opened, joined to the extracted root or used as a fallback. A complete tree
+ * deployed at an explicit DestinationPath must still be discovered, enumerated,
+ * chunk-resolved and mounted. All identifiers and payloads below are synthetic;
+ * no game bits, no account and no signed license are involved. */
+static void test_deployed_host_source()
+{
+    configure( main_config );
+    WCHAR root[MAX_PATH], layout[MAX_PATH], file[MAX_PATH], content[MAX_PATH], data[MAX_PATH], workspace[MAX_PATH],
+        linked[MAX_PATH];
+    content_package package{};
+    package_mount_plan plan;
+    char identifier[33], mapping[4096];
+    const char *drive_forward = "D:/titles/RE237/project_Hideki_MSG/package/source_IV";
+    const char *drive_backslash = "D:\\titles\\RE237\\project_Hideki_MSG\\package\\source_IV";
+    const char *unc_source = "\\\\buildhost\\share\\RE237\\project\\source_IV";
+    fixture( L"host-source", "Nexus.Host", "D0000000000C", "Nexus.Base", "B00000000001", 0x61, FALSE );
+    content_join( folder, L"host-source", root );
+    content_join( root, L"Content", content );
+    CHECK( "host-source-content-directory", CreateDirectoryW( content, NULL ) );
+    content_join( content, L"re_dlc_000.pak", file );
+    write_text( file, "synthetic re2 dlc pak, not game bits" );
+    content_join( root, L"Data", data );
+    CHECK( "host-source-data-directory", CreateDirectoryW( data, NULL ) );
+    content_join( data, L"extra.dat", file );
+    write_text( file, "synthetic unc destination payload" );
+    content_join( root, L"note.txt", file );
+    write_text( file, "synthetic slash-root payload" );
+    content_join( root, L"layout_00000061-1111-2222-3333-444444444444.xml", layout );
+    snprintf( mapping, sizeof( mapping ),
+              "<Package><Chunk Id=\"1000\">"
+              "<FileGroup SourcePath=\"%s\" Include=\"MicrosoftGame.config\" DestinationPath=\"\\\"/>"
+              "<FileGroup SourcePath=\"%s\" Include=\"*.pak\" DestinationPath=\"\\Content\"/>"
+              "<FileGroup SourcePath=\"%s\" Include=\"*.dat\" DestinationPath=\"/Data\"/>"
+              "<FileGroup SourcePath=\"%s\" Include=\"note.txt\" DestinationPath=\"/\"/>"
+              "</Chunk></Package>",
+              drive_forward, drive_backslash, unc_source, drive_forward );
+    write_text( layout, mapping );
+    SetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", root );
+    BOOL loaded = content_load( root, &package ) && package.content;
+    CHECK( "host-source-content-loaded", loaded );
+    CHECK( "host-source-content-identifier",
+           loaded && !strcmp( package.identifier, "00000061111122223333444444444444" ) );
+    CHECK( "host-source-content-query",
+           content_query_identifier( "D0000000000C", sizeof( identifier ), identifier ) == S_OK &&
+               !strcmp( identifier, "00000061111122223333444444444444" ) );
+    CHECK( "host-source-reverse-query",
+           xpackage_query_content_store( "00000061111122223333444444444444", sizeof( identifier ), identifier ) ==
+                   S_OK &&
+               !strcmp( identifier, "D0000000000C" ) );
+    enumerate( XPackageEnumerationScope::ThisOnly, 1, FALSE );
+    IXPackageImpl *api = GetPackageInterface();
+    IXPackageImpl2 *api2 = static_cast<IXPackageImpl2 *>( api );
+    IXPackageImpl3 *api3 = static_cast<IXPackageImpl3 *>( api );
+#define HOST_ENUMERATE( name, call )                                                                                   \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        expected = 1;                                                                                                  \
+        visits = 0;                                                                                                    \
+        stop_early = FALSE;                                                                                            \
+        CHECK( name, ( call ) == S_OK && visits == 1 );                                                                \
+    } while ( 0 )
+    HOST_ENUMERATE( "host-source-enumerate-legacy",
+                    api->XPackageEnumeratePackagesLegacy( XPackageKind::Content,
+                                                          XPackageEnumerationScope::ThisOnly, NULL, visit ) );
+    HOST_ENUMERATE( "host-source-enumerate-current",
+                    api->XPackageEnumeratePackages( XPackageKind::Content, XPackageEnumerationScope::ThisOnly, NULL,
+                                                    visit ) );
+    HOST_ENUMERATE( "host-source-enumerate-2",
+                    api2->XPackageEnumeratePackages2( XPackageKind::Content, XPackageEnumerationScope::ThisOnly, NULL,
+                                                      visit ) );
+    HOST_ENUMERATE( "host-source-enumerate-3",
+                    api3->XPackageEnumeratePackages3( XPackageKind::Content, XPackageEnumerationScope::ThisOnly, NULL,
+                                                      visit ) );
+#undef HOST_ENUMERATE
+    CHECK( "host-source-chunk-resolve",
+           api->XPackageChangeChunkInstallOrder( "00000061111122223333444444444444", 0, NULL ) == S_OK );
+    BOOL planned = package_mount_read_plan( package, plan ) == S_OK && plan.groups == 4 && plan.files.size() == 4;
+    CHECK( "host-source-mount-plan", planned && plan.destinations.count( L"Content\\re_dlc_000.pak" ) &&
+                                         plan.destinations.count( L"Data\\extra.dat" ) &&
+                                         plan.destinations.count( L"MicrosoftGame.config" ) &&
+                                         plan.destinations.count( L"note.txt" ) );
+    std::wstring pak_source = std::wstring( root ) + L"\\Content\\re_dlc_000.pak";
+    auto pak_entry = plan.destinations.find( L"Content\\re_dlc_000.pak" );
+    BOOL package_sources = planned && pak_entry != plan.destinations.end() &&
+                           plan.files[pak_entry->second].source == pak_source;
+    for ( const auto &planned_file : plan.files )
+        if ( planned_file.source.rfind( std::wstring( root ) + L"\\", 0 ) != 0 ||
+             planned_file.source.find( L"titles" ) != std::wstring::npos ||
+             planned_file.source.find( L"buildhost" ) != std::wstring::npos )
+            package_sources = FALSE;
+    CHECK( "host-source-mount-sources-package-root", package_sources );
+    content_join( folder, L"host-source-workspace", workspace );
+    CHECK( "host-source-workspace",
+           CreateDirectoryW( workspace, NULL ) && SetEnvironmentVariableW( L"XODUS_MOUNT_ROOT", workspace ) );
+    mount_fixture_license license;
+    XPackageMountHandle mount = NULL;
+    CHECK( "host-source-mount-created",
+           loaded && package_mount_create( package, mount_fixture_right( license ), &mount ) == S_OK && mount );
+    if ( mount )
+    {
+        SIZE_T size = 0;
+        char view_path[MAX_PATH * 4] = "";
+        WCHAR view[MAX_PATH] = L"";
+        BOOL path_ok = api->XPackageGetMountPathSize( mount, &size ) == S_OK && size > 1 &&
+                       api->XPackageGetMountPath( mount, size, view_path ) == S_OK &&
+                       MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, view_path, -1, view, MAX_PATH ) > 0;
+        CHECK( "host-source-mount-path", path_ok );
+        CHECK( "host-source-mount-payload",
+               path_ok && mount_fixture_bytes( std::wstring( view ) + L"\\Content\\re_dlc_000.pak",
+                                               "synthetic re2 dlc pak, not game bits" ) );
+        api->XPackageCloseMountHandle( mount );
+    }
+    CHECK( "host-source-workspace-cleared", SetEnvironmentVariableW( L"XODUS_MOUNT_ROOT", NULL ) );
+    CHECK( "host-source-workspace-empty", RemoveDirectoryW( workspace ) );
+    /* A host source with no usable destination cannot guess the package root. */
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/RE237/source\" Include=\"*.pak\"/>"
+                        "</Chunk></Package>" );
+    CHECK( "host-source-no-destination-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/RE237/source\" Include=\"*.pak\""
+                        " DestinationPath=\"\"/></Chunk></Package>" );
+    CHECK( "host-source-empty-destination-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:relative/build\" Include=\"*.pak\""
+                        " DestinationPath=\"\\Content\"/></Chunk></Package>" );
+    CHECK( "host-source-drive-relative-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/&#1;build/source\" Include=\"*.pak\""
+                        " DestinationPath=\"\\Content\"/></Chunk></Package>" );
+    CHECK( "host-source-control-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/*/source\" Include=\"*.pak\""
+                        " DestinationPath=\"\\Content\"/></Chunk></Package>" );
+    CHECK( "host-source-wildcard-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"..\\outside\" Include=\"*.pak\""
+                        " DestinationPath=\"\\Content\"/></Chunk></Package>" );
+    CHECK( "host-source-traversal-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/source\" Include=\"*.pak\""
+                        " DestinationPath=\"C:\\outside\"/></Chunk></Package>" );
+    CHECK( "host-source-drive-destination-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/source\" Include=\"*.pak\""
+                        " DestinationPath=\"\\\\server\\share\"/></Chunk></Package>" );
+    CHECK( "host-source-unc-destination-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/source\" Include=\"*.pak\""
+                        " DestinationPath=\"\\..\\outside\"/></Chunk></Package>" );
+    CHECK( "host-source-traversal-destination-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/source\" Include=\"..\\*.pak\""
+                        " DestinationPath=\"\\Content\"/></Chunk></Package>" );
+    CHECK( "host-source-invalid-include-rejected", !content_load( root, &package ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/source\" Include=\"*.pak\""
+                        " Exclude=\"../escape\" DestinationPath=\"\\Content\"/></Chunk></Package>" );
+    CHECK( "host-source-invalid-exclude-rejected", content_load( root, &package ) &&
+                                                      package_mount_read_plan( package, plan ) == E_INVALIDARG );
+    content_join( root, L"Linked", linked );
+    CHECK( "host-source-reparse-link",
+           CreateSymbolicLinkW( linked, content,
+                                SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE ) );
+    write_text( layout, "<Package><Chunk><FileGroup SourcePath=\"D:/titles/source\" Include=\"*.pak\""
+                        " DestinationPath=\"\\Linked\"/></Chunk></Package>" );
+    CHECK( "host-source-reparse-destination-rejected", !content_load( root, &package ) );
+    CHECK( "host-source-reparse-link-removed", RemoveDirectoryW( linked ) );
+    write_text( layout, mapping );
+    content_join( content, L"re_dlc_000.pak", file );
+    CHECK( "host-source-payload-removed", DeleteFileW( file ) );
+    CHECK( "host-source-missing-payload-rejected", !content_load( root, &package ) );
+    write_text( file, "synthetic re2 dlc pak, not game bits" );
+    write_text( layout, "<Package><Chunk>"
+                        "<FileGroup SourcePath=\"D:/titles/source\" Include=\"MicrosoftGame.config\""
+                        " DestinationPath=\"\\\"/>"
+                        "<FileGroup SourcePath=\"D:/titles/source\" Include=\"*.pak\" DestinationPath=\"\\Content\"/>"
+                        "<FileGroup SourcePath=\"D:/titles/source\" Include=\"*.bin\" DestinationPath=\"\\Missing\"/>"
+                        "</Chunk></Package>" );
+    CHECK( "host-source-one-group-missing-rejected", !content_load( root, &package ) );
+    SetEnvironmentVariableW( L"XODUS_CONTENT_ROOTS", folder );
+}
+
 int main( int argc, char **argv )
 {
     WCHAR temporary[MAX_PATH];
@@ -890,6 +1065,7 @@ int main( int argc, char **argv )
     test_mount_projection();
     test_mount_exclude();
     test_deployed_destination();
+    test_deployed_host_source();
     printf( "CHECKS %u FAILURES %u\n", checks, failures );
     return failures ? 1 : 0;
 }

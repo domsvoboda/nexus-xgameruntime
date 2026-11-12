@@ -276,6 +276,38 @@ static BOOL content_layout_location( xmlNodePtr node, const char *attribute, cha
     return TRUE;
 }
 
+/* A SourcePath that names an absolute build-machine coordinate is installation
+ * metadata, not package content: it is never opened, resolved or joined to the
+ * extracted root. Such a declaration is opaque and only usable when a separate,
+ * explicit DestinationPath selects the deployed tree for the whole package.
+ * Drive-relative "D:build" is not absolute, so it stays rejected; a single
+ * leading separator remains package-relative. Control and wildcard bytes are
+ * never accepted in any SourcePath. */
+static BOOL content_host_source( const char *text )
+{
+    const char *p;
+    BOOL drive, network;
+    if ( !text || !*text ) return FALSE;
+    for ( p = text; *p; ++p )
+        if ( ( unsigned char )*p < 32 || *p == '*' || *p == '?' ) return FALSE;
+    drive = ( ( text[0] >= 'A' && text[0] <= 'Z' ) || ( text[0] >= 'a' && text[0] <= 'z' ) ) &&
+            text[1] == ':' && ( text[2] == '\\' || text[2] == '/' );
+    network = ( text[0] == '\\' || text[0] == '/' ) && ( text[1] == '\\' || text[1] == '/' ) &&
+              text[2] && text[2] != '\\' && text[2] != '/';
+    return drive || network;
+}
+
+/* A host SourcePath is accepted as a declaration only alongside a destination,
+ * and never becomes a filesystem coordinate. Relative sources keep all package
+ * component rules. */
+static BOOL content_layout_source( xmlNodePtr node, BOOL destination )
+{
+    char value[MAX_PATH];
+    if ( !content_text( node, "SourcePath", value, sizeof( value ) ) ) return FALSE;
+    if ( content_host_source( value ) ) return destination;
+    return content_layout_location( node, "SourcePath", value, sizeof( value ) );
+}
+
 /* Include may carry one literal directory prefix; wildcards are leaf-only. */
 static BOOL content_include_parts( const char *include, char *prefix, SIZE_T size, const char **leaf )
 {
@@ -336,7 +368,9 @@ enum content_layout_coordinate
 };
 
 /* Validate every declared declaration before any tree is inspected, so an
- * invalid path cannot hide behind the other coordinate. */
+ * invalid path cannot hide behind the other coordinate. An opaque absolute
+ * build SourcePath is accepted only with an explicit destination; the deployed
+ * destination coordinate is still the only one that can then resolve files. */
 static BOOL content_layout_declarations( xmlNodePtr node, UINT depth, UINT *groups )
 {
     char include[MAX_PATH], prefix[MAX_PATH];
@@ -354,8 +388,8 @@ static BOOL content_layout_declarations( xmlNodePtr node, UINT depth, UINT *grou
                  !content_text( node, "Include", include, sizeof( include ) ) ||
                  !content_relative( include, TRUE ) ||
                  !content_include_parts( include, prefix, sizeof( prefix ), &leaf ) || !*leaf ||
-                 ( source && !content_layout_location( node, "SourcePath", prefix, sizeof( prefix ) ) ) ||
-                 ( destination && !content_layout_location( node, "DestinationPath", prefix, sizeof( prefix ) ) ) )
+                 ( destination && !content_layout_location( node, "DestinationPath", prefix, sizeof( prefix ) ) ) ||
+                 ( source && !content_layout_source( node, destination ) ) )
                 return FALSE;
         }
         if ( !content_layout_declarations( node->children, depth + 1, groups ) ) return FALSE;
