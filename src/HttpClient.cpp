@@ -167,6 +167,64 @@ cleanup:
     return hr;
 }
 
+/* Strict decimal Content-Length. An absent or unparsable header leaves the
+ * length unknown; a header that is present must be a valid SIZE_T or the
+ * response is rejected instead of being read with a guessed size. */
+enum raw_length_state
+{
+    RAW_LENGTH_UNKNOWN,
+    RAW_LENGTH_VALID,
+    RAW_LENGTH_INVALID,
+};
+
+static raw_length_state raw_content_length( HINTERNET request, SIZE_T *length )
+{
+    static const WCHAR name[] = L"Content-Length";
+    WCHAR buffer[64];
+    DWORD size = sizeof( buffer ), index = 0;
+    *length = 0;
+    if ( !WinHttpQueryHeaders( request, WINHTTP_QUERY_CUSTOM, name, buffer, &size, &index ) )
+    {
+        DWORD error = GetLastError();
+        if ( error == ERROR_WINHTTP_HEADER_NOT_FOUND ) return RAW_LENGTH_UNKNOWN;
+        /* A larger required size is a malformed length, never a silent skip. */
+        return RAW_LENGTH_INVALID;
+    }
+    const SIZE_T count = size / sizeof( WCHAR );
+    SIZE_T begin = 0, end = count;
+    while ( begin < count && ( buffer[begin] == L' ' || buffer[begin] == L'\t' ) ) begin++;
+    while ( end > begin && ( buffer[end - 1] == L' ' || buffer[end - 1] == L'\t' ) ) end--;
+    if ( begin == end ) return RAW_LENGTH_INVALID;
+    SIZE_T value = 0;
+    for ( SIZE_T i = begin; i < end; i++ )
+    {
+        if ( buffer[i] < L'0' || buffer[i] > L'9' ) return RAW_LENGTH_INVALID;
+        const SIZE_T digit = ( SIZE_T )( buffer[i] - L'0' );
+        if ( value > ( SIZE_MAX - digit ) / 10 ) return RAW_LENGTH_INVALID;
+        value = value * 10 + digit;
+    }
+    *length = value;
+    return RAW_LENGTH_VALID;
+}
+
+/* Transfer-Encoding overrides Content-Length for message framing. Presence is
+ * what matters, so a present header is honoured even if its value does not fit
+ * the buffer. Only a genuine absence returns FALSE; any other lookup failure is
+ * reported as an error instead of being treated as "no header". */
+static BOOL raw_has_transfer_encoding( HINTERNET request, HRESULT *error )
+{
+    static const WCHAR name[] = L"Transfer-Encoding";
+    WCHAR buffer[64];
+    DWORD size = sizeof( buffer ), index = 0;
+    *error = S_OK;
+    if ( WinHttpQueryHeaders( request, WINHTTP_QUERY_CUSTOM, name, buffer, &size, &index ) ) return TRUE;
+    DWORD failure = GetLastError();
+    if ( failure == ERROR_WINHTTP_HEADER_NOT_FOUND ) return FALSE;
+    if ( size > sizeof( buffer ) ) return TRUE;
+    *error = HRESULT_FROM_WIN32( failure );
+    return FALSE;
+}
+
 HRESULT http_request_raw( const WCHAR *method, const WCHAR *url, const WCHAR *headers, const void *body, DWORD bodySize,
                           DWORD *status, BYTE **buffer, SIZE_T *bufferSize )
 {
@@ -176,6 +234,8 @@ HRESULT http_request_raw( const WCHAR *method, const WCHAR *url, const WCHAR *he
     DWORD size = sizeof( DWORD );
     WCHAR *hostName = NULL;
     BYTE *tmpBuffer;
+    SIZE_T capacity = 0, declared = 0;
+    raw_length_state lengthState;
     HRESULT hr = S_OK;
 
     *buffer = NULL;
@@ -205,22 +265,74 @@ HRESULT http_request_raw( const WCHAR *method, const WCHAR *url, const WCHAR *he
     if ( !WinHttpQueryHeaders( request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                WINHTTP_HEADER_NAME_BY_INDEX, status, &size, WINHTTP_NO_HEADER_INDEX ) )
         goto error;
+    /* Bodiless responses carry no bytes to compare against metadata length:
+     * HEAD (the method is case-sensitive), informational 1xx, 204 and 304, and
+     * a successful CONNECT whose body is a tunnel. Transfer-Encoding overrides
+     * Content-Length, so a framed response never compares a declared length. */
+    if ( ( method && !wcscmp( method, L"HEAD" ) ) || ( *status >= 100 && *status < 200 ) || *status == 204 ||
+         *status == 304 || ( *status >= 200 && *status < 300 && method && !wcscmp( method, L"CONNECT" ) ) )
+        lengthState = RAW_LENGTH_UNKNOWN;
+    else
+    {
+        HRESULT framing = S_OK;
+        if ( raw_has_transfer_encoding( request, &framing ) ) lengthState = RAW_LENGTH_UNKNOWN;
+        else if ( FAILED( framing ) )
+        {
+            hr = framing;
+            goto cleanup;
+        }
+        else lengthState = raw_content_length( request, &declared );
+    }
+    if ( lengthState == RAW_LENGTH_INVALID )
+    {
+        hr = HRESULT_FROM_WIN32( ERROR_WINHTTP_INVALID_SERVER_RESPONSE );
+        goto cleanup;
+    }
 
-    do
+    /* Geometric growth keeps allocation and copying amortized linear in the
+     * response size instead of reallocating for every received block. */
+    for ( ;; )
     {
         if ( !WinHttpQueryDataAvailable( request, &size ) ) goto error;
         if ( !size ) break;
-        if ( !( tmpBuffer = static_cast<std::remove_reference_t<decltype( tmpBuffer )>>(
-                    realloc( *buffer, *bufferSize + size + 1 ) ) ) )
+        const SIZE_T used = *bufferSize;
+        if ( size > SIZE_MAX - used - 1 )
         {
             hr = E_OUTOFMEMORY;
             goto cleanup;
         }
-        *buffer = tmpBuffer;
-        if ( !WinHttpReadData( request, *buffer + *bufferSize, size, &size ) ) goto error;
-        *bufferSize += size;
+        if ( used + size + 1 > capacity )
+        {
+            SIZE_T grown = capacity ? capacity : 8192;
+            while ( grown < used + size + 1 )
+            {
+                if ( grown > ( SIZE_MAX - 1 ) / 2 )
+                {
+                    grown = used + size + 1;
+                    break;
+                }
+                grown *= 2;
+            }
+            if ( !( tmpBuffer = static_cast<std::remove_reference_t<decltype( tmpBuffer )>>( realloc( *buffer, grown ) ) ) )
+            {
+                hr = E_OUTOFMEMORY;
+                goto cleanup;
+            }
+            *buffer = tmpBuffer;
+            capacity = grown;
+        }
+        if ( !WinHttpReadData( request, *buffer + used, size, &size ) ) goto error;
+        *bufferSize = used + size;
         ( *buffer )[*bufferSize] = 0;
-    } while ( size );
+        if ( !size ) break;
+    }
+    if ( lengthState == RAW_LENGTH_VALID && *bufferSize != declared )
+    {
+        /* A short body under a valid declared length is a truncated transfer,
+         * not a complete response; never publish the partial bytes. */
+        hr = HRESULT_FROM_WIN32( ERROR_WINHTTP_CONNECTION_ERROR );
+        goto cleanup;
+    }
     goto cleanup;
 
 error:
