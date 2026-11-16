@@ -2313,3 +2313,96 @@ TEST( NexusSignedRequestRetry, XstsCallerPropagatesTerminalFailureWithoutRetryin
     EXPECT_EQ(user->GetAuthorization(L"https://service.example.invalid/",&authorization),E_ABORT);
     EXPECT_EQ(transport.rawCalls,1u);EXPECT_EQ(authorization,nullptr);free(authorization);
 }
+/* Configured wildcard host matching, exercised through the production
+ * GetEndpointInfo/LoadEndpoints path with in-memory metadata. Patterns come
+ * from the service endpoint table; no account, network or backend is used. */
+namespace
+{
+std::string EndpointAudience( XUser *user, const char *url )
+{
+    endpoint info{};
+    if ( FAILED( user->GetEndpointInfo( url, &info ) ) || !info.relyingParty ) return "<no-match>";
+    char buffer[256]{};
+    WideCharToMultiByte( CP_UTF8, 0, WindowsGetStringRawBuffer( info.relyingParty, nullptr ), -1, buffer,
+                         sizeof( buffer ), nullptr, nullptr );
+    return buffer;
+}
+std::string WildcardEndpoints( const char *host )
+{
+    return std::string( R"({"EndPoints":[{"Protocol":"https","Host":")" ) + host +
+           R"(","HostType":"wildcard","RelyingParty":"https://wild.example.invalid/","TokenType":"JWT"}]})";
+}
+void LoadEndpointsInto( XUser *user, const std::string &metadata )
+{
+    // This fixture supplies endpoint metadata directly, without network identity initialization.
+    user->initResult = S_OK;
+    user->initDone = TRUE;
+    ASSERT_EQ( user->LoadEndpoints( reinterpret_cast<const BYTE *>( metadata.data() ), metadata.size() ), S_OK );
+    ASSERT_EQ( user->endpointsLen, 1u );
+}
+constexpr const char *WildcardAudience = "https://wild.example.invalid/";
+}
+
+TEST( NexusEndpointWildcards, HostPatternsMatchCaseInsensitivelyIncludingTrailingStars )
+{
+    Apartment apartment;
+    SyntheticTransport transport;
+    auto user = CreateUser( transport );
+    LoadEndpointsInto( user.get(), WildcardEndpoints( "*.wild.example.invalid" ) );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://a.wild.example.invalid/api" ), WildcardAudience );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://A.Wild.Example.Invalid/api" ), WildcardAudience );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://wild.example.invalid.evil.invalid/" ), "<no-match>" );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://evil.invalid/a.wild.example.invalid" ), "<no-match>" );
+}
+TEST( NexusEndpointWildcards, PatternExhaustionBacktracks )
+{
+    Apartment apartment;
+    SyntheticTransport transport;
+    auto user = CreateUser( transport );
+    for ( auto [pattern, host] : { std::pair{ "*a", "https://aa/" }, std::pair{ "*a*b", "https://aabb/" },
+                                   std::pair{ "api*", "https://api1/" } } )
+    {
+        user->ResetNetworkState();
+        LoadEndpointsInto( user.get(), WildcardEndpoints( pattern ) );
+        EXPECT_EQ( EndpointAudience( user.get(), host ), WildcardAudience ) << pattern;
+    }
+}
+TEST( NexusEndpointWildcards, QuestionMatchesExactlyOneCharacter )
+{
+    Apartment apartment;
+    SyntheticTransport transport;
+    auto user = CreateUser( transport );
+    LoadEndpointsInto( user.get(), WildcardEndpoints( "api?.example.invalid" ) );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://api1.example.invalid/" ), WildcardAudience );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://api.example.invalid/" ), "<no-match>" );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://api12.example.invalid/" ), "<no-match>" );
+}
+TEST( NexusEndpointWildcards, EmptyAndRepeatedStarsStayBounded )
+{
+    Apartment apartment;
+    SyntheticTransport transport;
+    auto user = CreateUser( transport );
+    LoadEndpointsInto( user.get(), WildcardEndpoints( "" ) );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://anything.invalid/" ), "<no-match>" );
+    user->ResetNetworkState();
+    LoadEndpointsInto( user.get(), WildcardEndpoints( "**" ) );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://anything.invalid/" ), WildcardAudience );
+    user->ResetNetworkState();
+    LoadEndpointsInto( user.get(), WildcardEndpoints( "***.wild.example.invalid" ) );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://a.wild.example.invalid/" ), WildcardAudience );
+}
+TEST( NexusEndpointWildcards, ExactHostKeepsPrecedenceAndAudience )
+{
+    Apartment apartment;
+    SyntheticTransport transport;
+    auto user = CreateUser( transport );
+    const std::string metadata =
+        R"({"EndPoints":[{"Protocol":"https","Host":"*.wild.example.invalid","HostType":"wildcard","RelyingParty":"https://wild.example.invalid/","TokenType":"JWT"},)"
+        R"({"Protocol":"https","Host":"exact.wild.example.invalid","RelyingParty":"https://exact.example.invalid/","TokenType":"JWT"}]})";
+    ASSERT_EQ( user->LoadEndpoints( reinterpret_cast<const BYTE *>( metadata.data() ), metadata.size() ), S_OK );
+    ASSERT_EQ( user->endpointsLen, 2u );
+    user->initResult = S_OK;
+    user->initDone = TRUE;
+    EXPECT_EQ( EndpointAudience( user.get(), "https://exact.wild.example.invalid/" ), "https://exact.example.invalid/" );
+    EXPECT_EQ( EndpointAudience( user.get(), "https://other.wild.example.invalid/" ), WildcardAudience );
+}
