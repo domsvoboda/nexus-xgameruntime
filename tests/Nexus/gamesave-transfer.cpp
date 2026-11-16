@@ -56,6 +56,9 @@ static struct
     unsigned atoms, blob_puts, metadata_puts, releases, announced, calls, rejects;
     BOOL locked, fail_blob, fail_metadata, fail_release;
     HANDLE entered, resume;
+    /* Exact lock query values as sent, decoded once per request. */
+    char lock_query[8][1024], lock_decoded[8][1024];
+    unsigned lock_queries, lock_undecodable;
 } remote;
 HRESULT ClosedSaveTransport::SignedRequest( XUserHandle user, const char *method, const char *url, const char *auth,
                                             const char *headers, const void *body, DWORD count, DWORD *status,
@@ -75,6 +78,36 @@ HRESULT ClosedSaveTransport::SignedRequest( XUserHandle user, const char *method
     path = url + 23;
     if ( !strcmp( method, "PUT" ) && !strncmp( path, "/lock?", 6 ) )
     {
+        /* Capture the raw query and its percent-decoded value. A malformed
+         * escape or an overlong value is recorded, never truncated. */
+        static const char digits[] = "0123456789abcdef";
+        const char *query = path + 6;
+        char *decoded = remote.lock_decoded[remote.lock_queries < 8 ? remote.lock_queries : 7];
+        SIZE_T used = 0;
+        if ( remote.lock_queries < 8 && strlen( query ) < sizeof( remote.lock_query[0] ) )
+            strcpy( remote.lock_query[remote.lock_queries], query );
+        else
+            remote.lock_query[remote.lock_queries < 8 ? remote.lock_queries : 7][0] = 0;
+        decoded[0] = 0;
+        for ( const char *p = query; *p && used + 1 < sizeof( remote.lock_decoded[0] ); p++ )
+        {
+            if ( *p == '%' )
+            {
+                const char *high = p[1] ? strchr( digits, tolower( ( unsigned char )p[1] ) ) : NULL;
+                const char *low = p[1] && p[2] ? strchr( digits, tolower( ( unsigned char )p[2] ) ) : NULL;
+                if ( !high || !low )
+                {
+                    ++remote.lock_undecodable;
+                    break;
+                }
+                decoded[used++] = ( char )( ( high - digits ) * 16 + ( low - digits ) );
+                p += 2;
+            }
+            else
+                decoded[used++] = *p;
+        }
+        decoded[used] = 0;
+        ++remote.lock_queries;
         if ( remote.locked )
             *status = 409;
         else
@@ -171,7 +204,15 @@ HRESULT ClosedSaveTransport::SignedRequest( XUserHandle user, const char *method
     memcpy( *out, response, *size + 1 );
     return S_OK;
 }
+/* Test-only seam for the system-name source. Wine reads the prefix registry,
+ * so a fixture cannot make GetComputerNameExW fail; the macro must precede the
+ * production include because macros never apply retroactively. The shim below
+ * forwards to the real API, so production behaviour is unchanged. */
+static BOOL test_system_hostname_fails;
+static BOOL WINAPI test_GetComputerNameExW( COMPUTER_NAME_FORMAT format, LPWSTR name, LPDWORD size );
+#define GetComputerNameExW test_GetComputerNameExW
 #include "../../src/System/XGameSave.cpp"
+#undef GetComputerNameExW
 
 static char root[1024];
 static unsigned serial;
@@ -491,9 +532,149 @@ static void file_views_roundtrip( void )
     CHECK( "both-sessions-announced", remote.announced == 2 );
     CHECK( "views-no-network", !remote.rejects );
 }
+/* The lock query is display metadata only. These cases pin the exact decoded
+ * friendlyName VALUE sent by the production cloud_lock path, its raw
+ * percent-encoding and its bounded input handling. The captured query must be
+ * exactly one "friendlyName=" parameter, so no extra parameter can hide here.
+ * Unicode input is written with SetEnvironmentVariableW, because Wine's ANSI
+ * environment API uses the ANSI code page, not UTF-8. No real HTTP, account or
+ * save is involved. */
+static void lock_query( const char *label, const WCHAR *env, const char *expected, const char *raw, BOOL exact )
+{
+    struct XGameSaveProvider *a;
+    char name[64];
+    printf( "CASE lock friendly name %s\n", label );
+    memset( &remote, 0, sizeof( remote ) );
+    SetEnvironmentVariableW( L"NEXUS_DEVICE_HOSTNAME", env );
+    a = device( FALSE, label );
+    snprintf( name, sizeof( name ), "lock-%s", label );
+    CHECK( name, cloud_lock( a ) );
+    CHECK( name, remote.lock_queries == 1 && !remote.lock_undecodable );
+    CHECK( name, !strncmp( remote.lock_query[0], "friendlyName=", 13 ) );
+    CHECK( name, !strstr( remote.lock_query[0], "&" ) );
+    /* An unusable value falls back to the system name when Wine has one, so
+       only the encoding and label rules are pinned for those cases. */
+    if ( exact )
+    {
+        CHECK( name, !strcmp( remote.lock_query[0] + 13, raw ) );
+        CHECK( name, !strcmp( remote.lock_decoded[0] + 13, expected ) );
+    }
+    else
+    {
+        CHECK( name, !strstr( remote.lock_query[0] + 13, "%20" ) || strcmp( remote.lock_decoded[0] + 13, "Unknown device" ) );
+        CHECK( name, strcmp( remote.lock_decoded[0] + 13, "Xodus" ) );
+    }
+    CHECK( name, remote.releases == 0 && remote.announced == 0 );
+    close_provider( a );
+    SetEnvironmentVariableW( L"NEXUS_DEVICE_HOSTNAME", NULL );
+}
+static BOOL WINAPI test_GetComputerNameExW( COMPUTER_NAME_FORMAT format, LPWSTR name, LPDWORD size )
+{
+    if ( test_system_hostname_fails )
+    {
+        SetLastError( ERROR_ENVVAR_NOT_FOUND );
+        return FALSE;
+    }
+    return GetComputerNameExW( format, name, size );
+}
+
+static void lock_friendly_names( void )
+{
+    char oversized[2048], *p;
+    /* The old hardcoded label is the discriminator for these cases. */
+    lock_query( "mixed-case-host", L"GameRoom-PC", "GameRoom-PC", "GameRoom-PC", TRUE );
+    lock_query( "escaped", L"a&b/c?d#e%f+g=h", "a&b/c?d#e%f+g=h", "a%26b%2Fc%3Fd%23e%25f%2Bg%3Dh", TRUE );
+    lock_query( "space-and-unicode", L"desk 1 \u017e", "desk 1 \xc5\xbe", "desk%201%20%C5%BE", TRUE );
+    lock_query( "utf8", L"st\u00e9\u017e\u00ed\u010d", "st\xc3\xa9\xc5\xbe\xc3\xad\xc4\x8d",
+                "st%C3%A9%C5%BE%C3%AD%C4%8D", TRUE );
+    /* Unsupported values are never sent raw: with the system source forced to
+       fail, each one falls back to the exact encoded neutral label. */
+    test_system_hostname_fails = TRUE;
+    lock_query( "unpaired-surrogate", L"bad\xd800-host", "Unknown device", "Unknown%20device", TRUE );
+    lock_query( "control-bytes", L"tab\there\x01ctl", "Unknown device", "Unknown%20device", TRUE );
+    lock_query( "delete-byte", L"bad\x7fhost", "Unknown device", "Unknown%20device", TRUE );
+    lock_query( "empty-value", L"", "Unknown device", "Unknown%20device", TRUE );
+    lock_query( "missing-value", NULL, "Unknown device", "Unknown%20device", TRUE );
+    test_system_hostname_fails = FALSE;
+    /* 240 ASCII bytes: within the 255-byte bound, far beyond a NetBIOS name. */
+    for ( p = oversized; p < oversized + 240; p++ ) *p = ( char )( 'a' + ( p - oversized ) % 26 );
+    *p = 0;
+    {
+        WCHAR wide[241];
+        for ( unsigned i = 0; i < 240; i++ ) wide[i] = ( WCHAR )oversized[i];
+        wide[240] = 0;
+        lock_query( "long-valid", wide, oversized, oversized, TRUE );
+    }
+    test_system_hostname_fails = TRUE;
+    lock_query( "oversized", L"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+                L"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+                L"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+                "Unknown device", "Unknown%20device", TRUE );
+    test_system_hostname_fails = FALSE;
+    /* Deterministic both-sources-failed: the env is unusable and the system
+       source is forced to fail, so the exact neutral label is sent encoded. */
+    test_system_hostname_fails = TRUE;
+    lock_query( "both-sources-failed", L"bad\xd800-host", "Unknown device", "Unknown%20device", TRUE );
+    lock_query( "both-sources-failed-missing", NULL, "Unknown device", "Unknown%20device", TRUE );
+    test_system_hostname_fails = FALSE;
+}
+/* Bridge mode: consume the inherited environment exactly as production does,
+ * print the decoded label actually placed in the lock query, then exit. The
+ * native wrapper and real Wine are exercised by the external harness. */
+static void lock_bridge_report( void )
+{
+    struct XGameSaveProvider *a;
+    memset( &remote, 0, sizeof( remote ) );
+    a = device( FALSE, "bridge" );
+    CHECK( "bridge-lock", cloud_lock( a ) );
+    CHECK( "bridge-single-query", remote.lock_queries == 1 && !remote.lock_undecodable );
+    printf( "BRIDGE %s\n", remote.lock_decoded[0] );
+    close_provider( a );
+}
+static void lock_acquire_release_409( void )
+{
+    struct XGameSaveProvider *a;
+    printf( "CASE lock acquire, genuine 409 and session release with a host name\n" );
+    memset( &remote, 0, sizeof( remote ) );
+    SetEnvironmentVariableW( L"NEXUS_DEVICE_HOSTNAME", L"GameRoom-PC" );
+    a = device( FALSE, "lock-409" );
+    CHECK( "lock-409-acquire", cloud_lock( a ) );
+    CHECK( "lock-409-name", remote.lock_queries == 1 && !strcmp( remote.lock_decoded[0], "friendlyName=GameRoom-PC" ) );
+    /* Retention applies only to a session-owned lock. */
+    a->session_lock = TRUE;
+    CHECK( "lock-409-session-retained", cloud_lock( a ) && remote.lock_queries == 1 );
+    a->session_lock = FALSE;
+    CHECK( "lock-409-release", cloud_unlock( a, FALSE ) == S_OK && !a->locked && !remote.locked );
+    CHECK( "lock-409-release-query", remote.releases == 1 && !remote.announced );
+    /* Another device holds the lock: the genuine conflict is reported, the
+       provider stays unlocked and the sync fails rather than being disabled. */
+    remote.locked = TRUE;
+    CHECK( "lock-409-conflict", !cloud_lock( a ) && !a->locked );
+    CHECK( "lock-409-conflict-name", remote.lock_queries == 2 && !strcmp( remote.lock_decoded[1], "friendlyName=GameRoom-PC" ) );
+    CHECK( "lock-409-no-release", remote.releases == 1 );
+    remote.locked = FALSE;
+    close_provider( a );
+    SetEnvironmentVariableW( L"NEXUS_DEVICE_HOSTNAME", NULL );
+}
 int main( void )
 {
     InitializeLogging();
+    if ( getenv( "NEXUS_BRIDGE_REPORT" ) )
+    {
+        INITIALIZE_OPTIONS bridge{};
+        bridge.isInlineConfig = TRUE;
+        bridge.gameConfig = "<Game><Identity Name='Nexus.SaveFixture' Publisher='CN=Fixture'/></Game>";
+        CHECK( "actual-config", nexus::InitializeGameConfiguration( &bridge ) == S_OK );
+        WCHAR temp[MAX_PATH];
+        char path[1024];
+        GetTempPathW( MAX_PATH, temp );
+        WideCharToMultiByte( CP_UTF8, 0, temp, -1, path, sizeof( path ), NULL, NULL );
+        snprintf( root, sizeof( root ), "%snexus-bridge-%lu-%I64u", path, GetCurrentProcessId(), GetTickCount64() );
+        create_directories( root );
+        lock_bridge_report();
+        printf( "CHECKS %u FAILURES %u\n", checks, failures );
+        return failures ? 1 : 0;
+    }
     INITIALIZE_OPTIONS options{};
     options.isInlineConfig = TRUE;
     options.gameConfig = "<Game><Identity Name='Nexus.SaveFixture' Publisher='CN=Fixture'/></Game>";
@@ -519,6 +700,8 @@ int main( void )
         failed_close_and_retry( files );
     }
     file_views_roundtrip();
+    lock_friendly_names();
+    lock_acquire_release_409();
     printf( "CHECKS %u FAILURES %u\n", checks, failures );
     return failures ? 1 : 0;
 }

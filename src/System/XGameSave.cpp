@@ -893,11 +893,92 @@ static HRESULT cloud_request( struct XGameSaveProvider *provider, const char *me
     return hr;
 }
 
+/* The cloud lock's friendlyName is display metadata only. The runtime wrapper
+ * passes the host hostname in NEXUS_DEVICE_HOSTNAME for this launch; older or
+ * direct launches fall back to Wine's physical DNS host name. Wine's ANSI
+ * environment API uses the ANSI code page, so the inherited value is read as
+ * Unicode and validated by the strict UTF-8 conversion itself. A missing or
+ * unusable name never blocks the lock, so saves keep working without it. */
+#define DEVICE_HOSTNAME_MAX 255
+static const char device_hostname_fallback[] = "Unknown device";
+
+static BOOL device_hostname_utf8( const WCHAR *name, DWORD length, char *out, SIZE_T size )
+{
+    int bytes, wide;
+    if ( !length || length > DEVICE_HOSTNAME_MAX ) return FALSE;
+    bytes = WideCharToMultiByte( CP_UTF8, WC_ERR_INVALID_CHARS, name, length, out, size - 1, NULL, NULL );
+    if ( bytes <= 0 ) return FALSE;
+    out[bytes] = 0;
+    /* Strict round trip rejects unpaired surrogates and any non-canonical form. */
+    if ( ( wide = MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, out, bytes, NULL, 0 ) ) != ( int )length )
+        return FALSE;
+    {
+        WCHAR check[DEVICE_HOSTNAME_MAX + 1];
+        if ( MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, out, bytes, check, ARRAY_SIZE( check ) ) != wide ||
+             memcmp( check, name, ( SIZE_T )length * sizeof( WCHAR ) ) )
+            return FALSE;
+    }
+    /* Control characters are display-hostile in the lock label; DEL counts. */
+    for ( int i = 0; i < bytes; i++ )
+        if ( ( out[i] >= 0 && out[i] < 0x20 ) || out[i] == 0x7f ) return FALSE;
+    return TRUE;
+}
+
+/* Only RFC 3986 unreserved bytes stay literal; every other UTF-8 byte is
+ * percent-encoded. The bounded result never truncates: an oversized value is
+ * rejected instead of sending a partial label. */
+static BOOL device_hostname_encode( const char *name, char *out, SIZE_T size )
+{
+    static const char digits[] = "0123456789ABCDEF";
+    SIZE_T used = 0;
+    for ( ; *name; name++ )
+    {
+        BYTE c = ( BYTE )*name;
+        if ( ( c >= 'A' && c <= 'Z' ) || ( c >= 'a' && c <= 'z' ) || ( c >= '0' && c <= '9' ) || c == '-' || c == '.' ||
+             c == '_' || c == '~' )
+        {
+            if ( used + 1 >= size ) return FALSE;
+            out[used++] = ( char )c;
+        }
+        else
+        {
+            if ( used + 3 >= size ) return FALSE;
+            out[used++] = '%';
+            out[used++] = digits[c >> 4];
+            out[used++] = digits[c & 15];
+        }
+    }
+    out[used] = 0;
+    return TRUE;
+}
+
+static BOOL device_hostname_env( char *out, SIZE_T size )
+{
+    WCHAR name[DEVICE_HOSTNAME_MAX + 1];
+    DWORD length = GetEnvironmentVariableW( L"NEXUS_DEVICE_HOSTNAME", name, ARRAY_SIZE( name ) );
+    return length && length < ARRAY_SIZE( name ) && device_hostname_utf8( name, length, out, size );
+}
+
+static BOOL device_hostname_system( char *out, SIZE_T size )
+{
+    WCHAR name[DEVICE_HOSTNAME_MAX + 1];
+    DWORD length = ARRAY_SIZE( name );
+    if ( !GetComputerNameExW( ComputerNamePhysicalDnsHostname, name, &length ) ) return FALSE;
+    return device_hostname_utf8( name, length, out, size );
+}
+
+/* Per-call storage: providers may acquire their locks concurrently. */
+static BOOL device_hostname( char *out, SIZE_T size )
+{
+    return device_hostname_env( out, size ) || device_hostname_system( out, size );
+}
+
 static BOOL cloud_lock( struct XGameSaveProvider *provider )
 {
     save_remote_lock gate( provider );
     if ( FAILED( gate.status ) ) return FALSE;
     const char *quota;
+    char name[DEVICE_HOSTNAME_MAX + 1], encoded[DEVICE_HOSTNAME_MAX * 3 + 1], path[1024];
     SIZE_T size;
     BYTE *buffer;
     DWORD status;
@@ -905,8 +986,13 @@ static BOOL cloud_lock( struct XGameSaveProvider *provider )
 
     if ( provider->session_lock && provider->locked ) return TRUE;
     provider->locked = FALSE;
-    hr = cloud_request( provider, "PUT", "/lock?friendlyName=Xodus",
-                        "x-xbl-lock-ver: 1\r\nContent-Type: application/json\r\n", NULL, 0, &status, &buffer, &size );
+    /* The neutral label is chosen before encoding, so it is encoded like any
+     * other value and the query never carries a literal space. */
+    if ( !device_hostname( name, sizeof( name ) ) ) strcpy( name, device_hostname_fallback );
+    if ( !device_hostname_encode( name, encoded, sizeof( encoded ) ) ) return FALSE;
+    snprintf( path, sizeof( path ), "/lock?friendlyName=%s", encoded );
+    hr = cloud_request( provider, "PUT", path, "x-xbl-lock-ver: 1\r\nContent-Type: application/json\r\n", NULL, 0,
+                        &status, &buffer, &size );
     if ( FAILED( hr ) ) return FALSE;
     if ( status == 200 || status == 201 )
     {

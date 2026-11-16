@@ -344,3 +344,13 @@ target_link_libraries(nexus_http-native-cancellation PRIVATE xgameruntime-common
 target_compile_features(nexus_http-native-cancellation PRIVATE cxx_std_23)
 target_link_options(nexus_http-native-cancellation PRIVATE -static -static-libgcc -static-libstdc++)
 set_target_properties(nexus_http-native-cancellation PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+# Explicit native Wine/XGR contract probe for the raw response reader; not part
+# of the portable shim gate.
+add_executable(nexus_http-raw-response Nexus/http-raw-response.cpp)
+add_dependencies(nexus_http-raw-response xgameruntime-idl)
+target_include_directories(nexus_http-raw-response PRIVATE "${IDL_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(nexus_http-raw-response PRIVATE xgameruntime-common winhttp ws2_32 runtimeobject ole32)
+target_compile_features(nexus_http-raw-response PRIVATE cxx_std_23)
+target_link_options(nexus_http-raw-response PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_http-raw-response PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
