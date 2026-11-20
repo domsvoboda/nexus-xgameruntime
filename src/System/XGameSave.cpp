@@ -1038,6 +1038,32 @@ static void cloud_disable( struct XGameSaveProvider *provider )
     ERR( "cloud saves disabled for this session, continuing with local saves only.\n" );
 }
 
+/* Persistent atom cache for resumable container downloads.
+ * Cloud atoms are immutable and addressed by a unique id, so a downloaded atom
+ * can be reused by any later sync. Without this, a container download that
+ * fails part-way (e.g. a ~130-blob save container that takes longer than the
+ * session allows) discards everything and every retry starts from zero.
+ * Staging roots ("<root>\.incoming-{guid}" or "<root>.incoming-<pid>") map to
+ * the provider's cache "<root>\.atomcache\<atom>"; cloud_sync() removes it
+ * after a fully successful sync. */
+static BOOL atom_cache_path( const struct XGameSaveProvider *provider, const char *atom, char *out, size_t len )
+{
+    char base[2048];
+    lstrcpynA( base, provider->root, sizeof( base ) );
+    char *incoming = strstr( base, ".incoming-" );
+    if ( incoming ) *incoming = 0;
+    size_t baseLen = strlen( base );
+    if ( baseLen && base[baseLen - 1] == '\\' ) base[baseLen - 1] = 0;
+    /* atoms look like "7096A90B-0776-4A28-BCF9-DB1019AB4D15,binary" */
+    char safe[256];
+    size_t n = 0;
+    for ( const char *c = atom; *c && n + 1 < sizeof( safe ); c++ )
+        safe[n++] = ( isalnum( ( BYTE )*c ) || *c == '-' ) ? *c : '_';
+    safe[n] = 0;
+    if ( !n || atom[n] ) return FALSE;
+    return snprintf( out, len, "%s\\.atomcache\\%s", base, safe ) < ( int )len;
+}
+
 static HRESULT cloud_download_into( struct XGameSaveProvider *provider, const char *name, const char *display,
                                     const char *remoteTime )
 {
@@ -1092,8 +1118,24 @@ static HRESULT cloud_download_into( struct XGameSaveProvider *provider, const ch
         snprintf( path, sizeof( path ), "/%s", atom );
         data = NULL;
         dataSize = 0;
-        if ( SUCCEEDED( hr = cloud_request( provider, "GET", path, NULL, NULL, 0, &status, &data, &dataSize ) ) &&
-             status == 200 )
+        char cached[2048];
+        BOOL haveCache = atom_cache_path( provider, atom, cached, sizeof( cached ) );
+        if ( haveCache && SUCCEEDED( read_file( cached, &data, &dataSize ) ) )
+        {
+            hr = S_OK;
+            status = 200;
+            TRACE( "atom cache hit %s (%Iu bytes)\n", atom, dataSize );
+        }
+        else if ( SUCCEEDED( hr = cloud_request( provider, "GET", path, NULL, NULL, 0, &status, &data, &dataSize ) ) &&
+                  status == 200 && haveCache )
+        {
+            char dirPath[2048];
+            lstrcpynA( dirPath, cached, sizeof( dirPath ) );
+            char *slash = strrchr( dirPath, '\\' );
+            if ( slash ) { *slash = 0; files_mkdir( dirPath ); }
+            if ( FAILED( write_file( cached, data, dataSize ) ) ) WARN( "atom cache write failed %s\n", atom );
+        }
+        if ( SUCCEEDED( hr ) && status == 200 )
         {
             if ( dataSize > UINT_MAX )
                 hr = E_GS_UPDATE_TOO_BIG;
@@ -1826,6 +1868,13 @@ done:
         // containers using the listing from before the user made a choice.
         remote = NULL; count = capacity = listed = 0; refresh = FALSE;
         goto list_again;
+    }
+    if ( SUCCEEDED( hr ) )
+    {
+        /* Every container is in sync now; cached atoms are no longer needed. */
+        char cache[2048];
+        if ( snprintf( cache, sizeof( cache ), "%s\\.atomcache", provider->root ) < ( int )sizeof( cache ) )
+            delete_directory( cache );
     }
     return hr;
 }
