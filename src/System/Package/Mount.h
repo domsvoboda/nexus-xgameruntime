@@ -2,6 +2,7 @@
  * Licensed content mounts use a private projection of the package layout.
  * Installed files, public metadata and a package identifier never grant rights. */
 #include <bcrypt.h>
+#include <winioctl.h>
 #include <map>
 #include <memory>
 #include <new>
@@ -476,6 +477,36 @@ static HRESULT package_mount_make_directory( const std::wstring &root, const std
     return S_OK;
 }
 
+/* Share the installed file's blocks instead of copying them. Wine maps this to
+ * a Linux reflink, which takes milliseconds on btrfs and XFS; elsewhere the
+ * request fails and the caller copies. */
+static BOOL package_mount_clone( const WCHAR *source, const WCHAR *target, UINT64 bytes )
+{
+    HANDLE from = CreateFileW( source, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    if ( from == INVALID_HANDLE_VALUE )
+        return FALSE;
+    HANDLE to = CreateFileW( target, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL );
+    if ( to == INVALID_HANDLE_VALUE )
+    {
+        CloseHandle( from );
+        return FALSE;
+    }
+    FILE_END_OF_FILE_INFO size{};
+    size.EndOfFile.QuadPart = ( LONGLONG )bytes;
+    DUPLICATE_EXTENTS_DATA extents{};
+    extents.FileHandle = from;
+    extents.ByteCount.QuadPart = ( LONGLONG )bytes;
+    DWORD returned;
+    BOOL cloned = SetFileInformationByHandle( to, FileEndOfFileInfo, &size, sizeof( size ) ) &&
+                  DeviceIoControl( to, FSCTL_DUPLICATE_EXTENTS_TO_FILE, &extents, sizeof( extents ), NULL, 0,
+                                   &returned, NULL );
+    CloseHandle( to );
+    CloseHandle( from );
+    if ( !cloned )
+        DeleteFileW( target );
+    return cloned;
+}
+
 /* Consumes the independently obtained license on both success and failure.
  * The internal callback form lets closed, account-free fixtures exercise the
  * exact projection code without an alternate production licensing provider. */
@@ -558,7 +589,8 @@ static HRESULT package_mount_create( const content_package &package, package_mou
             if ( attributes == INVALID_FILE_ATTRIBUTES ||
                  ( attributes & ( FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT ) ) )
                 return E_ACCESSDENIED;
-            if ( !CopyFileW( file.source.c_str(), target.c_str(), TRUE ) )
+            if ( !package_mount_clone( file.source.c_str(), target.c_str(), file.bytes ) &&
+                 !CopyFileW( file.source.c_str(), target.c_str(), TRUE ) )
                 return HRESULT_FROM_WIN32( GetLastError() );
             WIN32_FILE_ATTRIBUTE_DATA data{};
             if ( !GetFileAttributesExW( target.c_str(), GetFileExInfoStandard, &data ) ||
