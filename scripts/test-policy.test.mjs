@@ -488,7 +488,7 @@ test('WinRT-dependent privilege validation has a separate matching-engine gate',
     assert.match(read('scripts/test-user-contracts.mjs'),/auth-metadata',200/);
     assert.doesNotMatch(read('scripts/test-component.mjs'),/\['nexus_user-privilege',/);
     // Windows.Data.Json is not registered in stock Wine, so these parse through it only on the matching engine.
-    for(const [name,minimum] of [['legacy-service-client',70],['auth-rejection-metadata',28],['store-license-map',90]]){
+    for(const [name,minimum] of [['legacy-service-client',70],['auth-rejection-metadata',28],['store-license-map',90],['windows-title-auth',325]]){
         assert.ok(read('scripts/test-user-contracts.mjs').includes(`['${name}',${minimum}]`),name);
         assert.ok(!read('scripts/test-component.mjs').includes(`['nexus_${name}',`),name);
     }
@@ -588,7 +588,7 @@ test('sign-in HTTP cancellation retains synchronous ownership and stops later wo
     const name='SignInHttpCancellationRetainsHeldCallAndStopsEveryLaterPhase';
     assert.ok(read('tests/Nexus/test_user.cpp').includes('TEST( NexusAuthentication, '+name+' )'));
     assert.ok(read('scripts/test-authentication.mjs').includes("'"+name+"'"));
-    assert.equal([...read('src/System/XUser.cpp').matchAll(/user->transport\.HttpCancellable\(/g)].length,4);
+    assert.equal([...read('src/System/XUser.cpp').matchAll(/user->transport\.HttpCancellable\(/g)].length,5);
 });
 
 test('native authentication gate requires production cold-path and terminal-retry regressions',()=>{

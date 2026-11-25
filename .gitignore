@@ -1,2 +1,6 @@
 /build/
 /cmake-build-*/
+
+# Python protocol test caches
+**/__pycache__/
+*.pyc

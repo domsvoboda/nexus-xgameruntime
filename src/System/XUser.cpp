@@ -119,7 +119,9 @@ static void auth_metadata( const char *phase, XUserHandle user, HRESULT hr, DWOR
     LARGE_INTEGER size, end;
     HANDLE file;
     unsigned int i;
-    static const char *const phases[] = { "sisu",
+    static const char *const phases[] = { "windows-title",
+                                          "windows-title-optional",
+                                          "sisu",
                                           "resolve-privilege",
                                           "get-token-complete",
                                           "get-token-begin",
@@ -481,9 +483,15 @@ cleanup:
     return hr;
 }
 
-static HRESULT xsts_authorize( XUserHandle user, const char *relyingParty, BOOL title, char **auth );
+static HRESULT xsts_authorize( XUserHandle user, const char *relyingParty, BOOL title, char **auth,
+                               bool presence = false, const std::atomic<bool> *cancel = nullptr );
 static HRESULT xsts_authorize_privilege( XUserHandle user, const char *relyingParty, BOOL title, char **auth,
-                                         XUserPrivilege privilege, BOOLEAN *granted, bool presence = false, UINT64 *expires = nullptr );
+                                         XUserPrivilege privilege, BOOLEAN *granted, bool presence = false,
+                                         UINT64 *expires = nullptr, const std::atomic<bool> *cancel = nullptr );
+static HRESULT xuser_signed_request_cancellable( XUserHandle user, const char *method, const char *url,
+                                                 const char *auth, const char *extraHeaders, const void *body,
+                                                 DWORD bodySize, DWORD *status, BYTE **buffer, SIZE_T *bufferSize,
+                                                 const std::atomic<bool> *cancel );
 static char *hstring_to_utf8( HSTRING string );
 static WCHAR *utf8_to_wide( const char *string );
 
@@ -728,6 +736,98 @@ cleanup:
     return hr;
 }
 
+/* Schema-0 packages can identify their title without a declared MSA client.
+ * Explicit and modern clients keep the SISU title flow. */
+static bool legacy_title_eligible( const nexus::GameConfiguration *config )
+{
+    return config && config->titleId && config->msaAppId.empty() &&
+           config->game.attribute( "configVersion" ) == "0";
+}
+
+/* Legacy Windows packages can identify their title without an MSA client.
+ * Request genuine device/proof-bound title authentication, then retain the
+ * existing strict server-claim check. No fallback application becomes a title. */
+static HRESULT windows_title_auth( XUserHandle user )
+{
+    const auto *config = nexus::GetGameConfiguration();
+    if ( !legacy_title_eligible( config ) ) return E_INVALIDARG;
+    if ( user->cancelled ) return E_ABORT;
+    if ( !user->deviceToken || !user->proofKey ) return E_GAMEUSER_NO_AUTH_USER;
+    char *body = NULL, *bound = NULL;
+    BYTE *buffer = NULL;
+    SIZE_T responseSize = 0;
+    DWORD status = 0;
+    IJsonObject *object = NULL;
+    HSTRING token = NULL;
+    UINT32 claimed = 0;
+    HRESULT hr;
+    SIZE_T capacity = strlen( user->deviceToken ) + strlen( user->proofKey ) + 256;
+    if ( !( body = static_cast<char *>( calloc( 1, capacity ) ) ) ) return E_OUTOFMEMORY;
+    int count = snprintf( body, capacity,
+        "{\"RelyingParty\":\"http://auth.xboxlive.com\",\"TokenType\":\"JWT\",\"Properties\":{"
+        "\"DeviceToken\":\"%s\",\"TitleId\":%lu,\"ProofKey\":%s}}",
+        user->deviceToken, static_cast<unsigned long>( config->titleId ), user->proofKey );
+    if ( count < 0 || static_cast<SIZE_T>( count ) >= capacity ) { hr = E_INVALIDARG; goto done; }
+    hr = xuser_signed_request_cancellable( user, "POST", "https://title.auth.xboxlive.com/title/authenticate", NULL,
+        "Content-Type: application/json\r\nx-xbl-contract-version: 1\r\n", body, count,
+        &status, &buffer, &responseSize, &user->cancelled );
+    if ( FAILED( hr ) ) goto done;
+    if ( user->cancelled ) { hr = E_ABORT; goto done; }
+    if ( status != 200 ) { hr = HRESULT_FROM_WIN32( ERROR_ACCESS_DENIED ); goto done; }
+    if ( FAILED( hr = parse_json( reinterpret_cast<char *>( buffer ), responseSize, &object ) ) ) goto done;
+    if ( FAILED( hr = title_token_claim_title( object, &claimed ) ) ) goto done;
+    if ( claimed != config->titleId ) { hr = E_ACCESSDENIED; goto done; }
+    if ( FAILED( hr = get_json_string( object, L"Token", &token ) ) ) goto done;
+    bound = hstring_to_utf8( token );
+    if ( !bound || !*bound ) { hr = E_UNEXPECTED; goto done; }
+    free( user->titleToken );
+    user->titleToken = bound;
+    bound = NULL;
+    user->titleTokenTitleId = claimed;
+    hr = S_OK;
+done:
+    auth_metadata( "windows-title", user, hr, status, TRUE, SUCCEEDED( hr ) );
+    nexus::title_identity::WriteBinding( config, hr, claimed, SUCCEEDED( hr ) ? "bound" : "missing" );
+    if ( token ) WindowsDeleteString( token );
+    if ( object ) object->Release();
+    free( bound );
+    free( buffer );
+    free( body );
+    return hr;
+}
+
+/* Signed headers for current-title discovery over the Windows title proof.
+ * The title token must carry this title's claim and the title-bearing XSTS
+ * assertion must name the signed-in canonical XUID; a missing, malformed or
+ * foreign identity never yields authorization. */
+static HRESULT legacy_title_headers( XUserHandle user, WCHAR **headers )
+{
+    char *authorization = NULL, signature[105] = { 0 };
+    HRESULT hr;
+
+    if ( !headers ) return E_INVALIDARG;
+    *headers = NULL;
+    if ( FAILED( hr = windows_title_auth( user ) ) ) return hr;
+    if ( FAILED( hr = xsts_authorize( user, "http://xboxlive.com", TRUE, &authorization, true, &user->cancelled ) ) )
+        goto done;
+    if ( user->cancelled )
+    {
+        hr = E_ABORT;
+        goto done;
+    }
+    if ( FAILED( hr = user->GetSignature( 1, "GET", "https://title.mgt.xboxlive.com/titles/current/endpoints",
+                                          authorization, 0, NULL, signature ) ) )
+        goto done;
+    {
+        std::string text = std::string( "Authorization: " ) + authorization + "\r\nSignature: " + signature +
+                           "\r\nx-xbl-contract-version: 1\r\n";
+        if ( !( *headers = utf8_to_wide( text.c_str() ) ) ) hr = E_OUTOFMEMORY;
+    }
+done:
+    free( authorization );
+    return hr;
+}
+
 HRESULT XUser::LoadEndpoints( const BYTE *buffer, SIZE_T size )
 {
     XUser *user = this;
@@ -920,6 +1020,26 @@ HRESULT WINAPI XUser::Initialize( const XUserAddOptions options )
     return S_OK;
 }
 
+/* An optional discovery payload that fails to parse must not publish the
+ * records it appended before the failure. Only the tail beyond the marks is
+ * owned by that parse; earlier endpoints and their policy copies stay intact. */
+static void discard_appended_endpoints( XUser *user, UINT32 endpointsMark, UINT32 policiesMark )
+{
+    if ( user->endpointsLen > endpointsMark )
+    {
+        for ( UINT32 i = endpointsMark; i < user->endpointsLen; ++i )
+        {
+            WindowsDeleteString( user->endpoints[i].protocol );
+            WindowsDeleteString( user->endpoints[i].host );
+            WindowsDeleteString( user->endpoints[i].path );
+            WindowsDeleteString( user->endpoints[i].relyingParty );
+            WindowsDeleteString( user->endpoints[i].tokenType );
+        }
+        user->endpointsLen = endpointsMark;
+    }
+    if ( user->policiesLen > policiesMark ) user->policiesLen = policiesMark;
+}
+
 /* The endpoint/device/SISU handshake can take minutes on a cold token cache.
  * Titles time out sign-in while XUserAddAsync sits in DoWork for that long,
  * so it runs on a background thread; consumers wait through user_wait_init. */
@@ -934,7 +1054,8 @@ HRESULT XUser::InitializeNetwork( XUserAddOptions options )
     SIZE_T size, defaultSize = 0;
     HRESULT hr;
     SilentUserTickets silentTickets( user );
-    bool overlappingTickets = false;
+    bool overlappingTickets = false, titleDiscoveryAccepted = false;
+    const auto *legacyConfig = nexus::GetGameConfiguration();
 
     /* The launcher already found Microsoft unreachable; fail as the network would. */
     if ( nexus::user::ForcedOffline() ) return HRESULT_FROM_WIN32( ERROR_WINHTTP_CANNOT_CONNECT );
@@ -993,23 +1114,85 @@ HRESULT XUser::InitializeNetwork( XUserAddOptions options )
         hr = E_ABORT;
         goto cleanup;
     }
-    auth_metadata( "init-current-begin", user, E_PENDING, 0, FALSE, FALSE );
-    hr = user->transport.HttpCancellable( L"GET", L"https://title.mgt.xboxlive.com/titles/current/endpoints", NULL, auth,
-                                          ACCEPT_JSON, &currentBuffer, &size, user->cancelled );
-    auth_metadata( "init-current-end", user, hr, 0, FALSE, FALSE );
-    if ( FAILED( hr ) ) goto cleanup;
-    if ( cancelled )
+    if ( legacy_title_eligible( legacyConfig ) )
     {
-        hr = E_ABORT;
-        goto cleanup;
+        WCHAR *titleHeaders = NULL;
+        BYTE *titleBuffer = NULL;
+        SIZE_T titleSize = 0;
+        char *previousTitleToken = impl->titleToken;
+        UINT32 previousTitleTokenTitleId = impl->titleTokenTitleId;
+        UINT32 endpointsMark = impl->endpointsLen, policiesMark = impl->policiesLen;
+        /* The optional Windows title proof replaces, but never precedes, a
+         * title token that the platform SISU exchange already bound strictly
+         * to this configured title. The validated SISU authorization and that
+         * proof stay live until the signed current-title discovery and its
+         * payload have both been accepted. */
+        impl->titleToken = NULL;
+        impl->titleTokenTitleId = 0;
+        hr = legacy_title_headers( impl, &titleHeaders );
+        if ( SUCCEEDED( hr ) )
+            hr = user->transport.HttpCancellable( L"GET", L"https://title.mgt.xboxlive.com/titles/current/endpoints",
+                                                  NULL, titleHeaders, ACCEPT_JSON, &titleBuffer, &titleSize,
+                                                  user->cancelled );
+        if ( SUCCEEDED( hr ) && !cancelled ) hr = impl->LoadEndpoints( titleBuffer, titleSize );
+        if ( SUCCEEDED( hr ) && !cancelled )
+        {
+            titleDiscoveryAccepted = true;
+            free( previousTitleToken );
+            free( auth );
+            auth = titleHeaders;
+            titleHeaders = NULL;
+            currentBuffer = titleBuffer;
+            size = titleSize;
+            titleBuffer = NULL;
+        }
+        else
+        {
+            /* Title authentication is optional: an unsupported, denied or
+             * unbound title, or a refused or invalid title discovery payload,
+             * must not invalidate the authenticated local user. Discard the
+             * failed attempt's proof and any partially learned endpoints,
+             * restore the validated SISU state, then use platform discovery.
+             * Cancellation still ends the whole operation without fallback. */
+            auth_metadata( "windows-title-optional", impl, hr, 0, TRUE, FALSE );
+            free( titleBuffer );
+            free( titleHeaders );
+            free( impl->titleToken );
+            impl->titleToken = previousTitleToken;
+            impl->titleTokenTitleId = previousTitleTokenTitleId;
+            discard_appended_endpoints( impl, endpointsMark, policiesMark );
+            if ( previousTitleToken )
+                nexus::title_identity::WriteBinding( legacyConfig, S_OK, previousTitleTokenTitleId, "bound" );
+            else
+                nexus::title_identity::WriteBinding( legacyConfig, hr, 0, "missing" );
+            if ( impl->cancelled || hr == E_ABORT )
+            {
+                hr = E_ABORT;
+                goto cleanup;
+            }
+            hr = S_OK;
+        }
     }
-    hr = impl->LoadEndpoints( currentBuffer, size );
-    auth_metadata( "init-current-parse", user, hr, 0, FALSE, FALSE );
-    if ( FAILED( hr ) ) goto cleanup;
-    if ( cancelled )
+    if ( !titleDiscoveryAccepted )
     {
-        hr = E_ABORT;
-        goto cleanup;
+        auth_metadata( "init-current-begin", user, E_PENDING, 0, FALSE, FALSE );
+        hr = user->transport.HttpCancellable( L"GET", L"https://title.mgt.xboxlive.com/titles/current/endpoints", NULL,
+                                              auth, ACCEPT_JSON, &currentBuffer, &size, user->cancelled );
+        auth_metadata( "init-current-end", user, hr, 0, FALSE, FALSE );
+        if ( FAILED( hr ) ) goto cleanup;
+        if ( cancelled )
+        {
+            hr = E_ABORT;
+            goto cleanup;
+        }
+        hr = impl->LoadEndpoints( currentBuffer, size );
+        auth_metadata( "init-current-parse", user, hr, 0, FALSE, FALSE );
+        if ( FAILED( hr ) ) goto cleanup;
+        if ( cancelled )
+        {
+            hr = E_ABORT;
+            goto cleanup;
+        }
     }
     impl->RememberOfflineIdentity( defaultBuffer, defaultSize, currentBuffer, size );
 
@@ -3008,15 +3191,20 @@ UINT64 xuser_get_xuid( XUserHandle user )
     return user->xuid;
 }
 
-HRESULT xuser_signed_request( XUserHandle user, const char *method, const char *url, const char *auth,
-                              const char *extraHeaders, const void *body, DWORD bodySize, DWORD *status, BYTE **buffer,
-                              SIZE_T *bufferSize )
+/* Shared signed request path. A cancellation flag, when supplied, stops the
+ * retry loop and suppresses a response that raced with cancellation. Ordinary
+ * uncancelled requests keep the existing bounded retry policy. */
+static HRESULT xuser_signed_request_cancellable( XUserHandle user, const char *method, const char *url,
+                                                 const char *auth, const char *extraHeaders, const void *body,
+                                                 DWORD bodySize, DWORD *status, BYTE **buffer, SIZE_T *bufferSize,
+                                                 const std::atomic<bool> *cancel )
 {
     WCHAR *methodW = NULL, *urlW = NULL, *headersW = NULL;
     char signature[105] = { 0 }, *headers = NULL;
     SIZE_T headersSize;
     HRESULT hr;
 
+    if ( cancel && cancel->load( std::memory_order_acquire ) ) return E_ABORT;
     if ( FAILED( hr = ( user )->GetSignature( 1, method, url, auth ? auth : "", std::min<SIZE_T>( bodySize, 8192 ),
                                               body, signature ) ) )
         return hr;
@@ -3037,10 +3225,39 @@ HRESULT xuser_signed_request( XUserHandle user, const char *method, const char *
     {
         for ( int attempt = 0; attempt < 3; attempt++ )
         {
+            if ( cancel && cancel->load( std::memory_order_acquire ) )
+            {
+                hr = E_ABORT;
+                break;
+            }
             if ( attempt )
             {
-
-                Sleep( 500 * attempt );
+                if ( !cancel )
+                    Sleep( 500 * attempt );
+                else
+                {
+                    for ( DWORD remaining = 500 * attempt; remaining; )
+                    {
+                        if ( cancel->load( std::memory_order_acquire ) )
+                        {
+                            hr = E_ABORT;
+                            break;
+                        }
+                        DWORD slice = remaining > 50 ? 50 : remaining;
+                        Sleep( slice );
+                        remaining -= slice;
+                    }
+                    if ( hr == E_ABORT ) break;
+                }
+            }
+            /* The final back-off slice is followed by a wake-up before this
+             * point, so the flag is read again before any raw request is
+             * admitted: cancellation observed after the last slice check must
+             * not start another request. */
+            if ( cancel && cancel->load( std::memory_order_acquire ) )
+            {
+                hr = E_ABORT;
+                break;
             }
             if ( SUCCEEDED( hr = user->transport.HttpRaw( methodW, urlW, headersW, body, bodySize, status, buffer,
                                                           bufferSize ) ) &&
@@ -3055,6 +3272,7 @@ HRESULT xuser_signed_request( XUserHandle user, const char *method, const char *
                 *bufferSize = 0;
             }
         }
+        if ( SUCCEEDED( hr ) && cancel && cancel->load( std::memory_order_acquire ) ) hr = E_ABORT;
     }
 
     free( methodW );
@@ -3064,13 +3282,24 @@ HRESULT xuser_signed_request( XUserHandle user, const char *method, const char *
     return hr;
 }
 
-static HRESULT xsts_authorize( XUserHandle user, const char *relyingParty, BOOL title, char **auth )
+HRESULT xuser_signed_request( XUserHandle user, const char *method, const char *url, const char *auth,
+                              const char *extraHeaders, const void *body, DWORD bodySize, DWORD *status, BYTE **buffer,
+                              SIZE_T *bufferSize )
 {
-    return xsts_authorize_privilege( user, relyingParty, title, auth, static_cast<XUserPrivilege>( 0 ), NULL );
+    return xuser_signed_request_cancellable( user, method, url, auth, extraHeaders, body, bodySize, status, buffer,
+                                             bufferSize, nullptr );
+}
+
+static HRESULT xsts_authorize( XUserHandle user, const char *relyingParty, BOOL title, char **auth, bool presence,
+                               const std::atomic<bool> *cancel )
+{
+    return xsts_authorize_privilege( user, relyingParty, title, auth, static_cast<XUserPrivilege>( 0 ), NULL, presence,
+                                     nullptr, cancel );
 }
 
 static HRESULT xsts_authorize_privilege( XUserHandle user, const char *relyingParty, BOOL title, char **auth,
-                                         XUserPrivilege privilege, BOOLEAN *granted, bool presence, UINT64 *expires )
+                                         XUserPrivilege privilege, BOOLEAN *granted, bool presence, UINT64 *expires,
+                                         const std::atomic<bool> *cancel )
 {
     static const char url[] = "https://xsts.auth.xboxlive.com/xsts/authorize";
     IJsonObject *object = NULL, *claims = NULL, *identity = NULL;
@@ -3111,9 +3340,9 @@ static HRESULT xsts_authorize_privilege( XUserHandle user, const char *relyingPa
               relyingParty, user->deviceToken, title ? "\"TitleToken\":\"" : "", title ? user->titleToken : "",
               title ? "\"," : "", user->userToken, user->proofKey );
 
-    if ( FAILED( hr = xuser_signed_request( user, "POST", url, NULL,
-                                            "x-xbl-contract-version: 1\r\nContent-Type: application/json\r\n", body,
-                                            strlen( body ), &status, &buffer, &bufferSize ) ) )
+    if ( FAILED( hr = xuser_signed_request_cancellable( user, "POST", url, NULL,
+                                                        "x-xbl-contract-version: 1\r\nContent-Type: application/json\r\n",
+                                                        body, strlen( body ), &status, &buffer, &bufferSize, cancel ) ) )
         goto cleanup;
     if ( status != 200 )
     {

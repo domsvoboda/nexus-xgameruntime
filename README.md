@@ -8,6 +8,29 @@ Nexus integrations include account authentication, cloud saves, package metadata
 
 Associated-product queries use the public retail catalog with fixed 25-item service windows and local result pages limited to 100 items. They support the currently configured title only; foreign association roots, authenticated or private-audience catalogs and purchase UI are not supported. Collection flags come from verified current-title Store receipts, never from the public listing. 32-bit parity is not verified.
 
+## Legacy Windows title authentication
+
+Schema-0 Windows packages that declare a `TitleId` but no `MSAAppId` use signed
+Windows title authentication with the existing device token and proof key. The
+runtime accepts the returned title token only when its server claim matches the
+configured title. It then obtains title-bearing XSTS authorization bound to the
+signed-in account's canonical XUID and signs the current-title endpoint-discovery
+request with the same key. Explicit MSA clients retain the existing SISU flow. If
+optional title authentication is refused or cannot be bound to that account,
+local sign-in and platform discovery continue without title authorization. A
+platform sign-in token is not proof of the running game's identity.
+
+Support is limited to this schema-0 Microsoft Store package case; other games,
+online features and completed matches are not verified.
+
+The protocol approach was informed by [Ferestre's title-authentication work](https://github.com/icex/xodus/commit/41c9baa928bfec32d52b2d7a011f160c6523f31e)
+and its [authentication notes](https://github.com/icex/ferestre/blob/main/docs/XBOX_LIVE.md).
+The implementation here uses Nexus's existing transport, signing and claim
+validation. `nexus_windows-title-auth` tests the request, mismatched, malformed
+and foreign claims, missing tokens, server refusal, in-flight cancellation and
+the full legacy sign-in through title-bound, signed endpoint discovery with
+synthetic data.
+
 ## Building
 
 Linux cross-compilation requires CMake 3.20 or later, Make, MinGW-w64 with C++23 support, and Wine's WIDL. Tests also require Node.js 22, Wine with both Windows architectures enabled, the pinned GoogleTest submodule, and the Wine source tree selected by `cmake/xml2.lock.json`. Its bundled libxml2 is compiled from source, with every input checked against that lock.

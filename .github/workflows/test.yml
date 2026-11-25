@@ -18,6 +18,8 @@ jobs:
           node-version: '22'
       - name: Check source contracts without compiling a component
         run: node --test scripts/test-policy.test.mjs scripts/test-store-context.test.mjs scripts/test-source-only.test.mjs scripts/test-xml2-source.test.mjs
+      - name: Check native text-entry protocol without GTK or a display
+        run: python3 -m unittest discover -s tests/TextEntry -v
       - run: git diff --check
   component:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'

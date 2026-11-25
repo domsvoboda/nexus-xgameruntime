@@ -354,3 +354,9 @@ target_link_libraries(nexus_http-raw-response PRIVATE xgameruntime-common winhtt
 target_compile_features(nexus_http-raw-response PRIVATE cxx_std_23)
 target_link_options(nexus_http-raw-response PRIVATE -static -static-libgcc -static-libstdc++)
 set_target_properties(nexus_http-raw-response PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(nexus_windows-title-auth Nexus/windows-title-auth.cpp)
+target_link_libraries(nexus_windows-title-auth PRIVATE xgameruntime-impl nexus-xml2)
+target_compile_features(nexus_windows-title-auth PRIVATE cxx_std_23)
+target_link_options(nexus_windows-title-auth PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus_windows-title-auth PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

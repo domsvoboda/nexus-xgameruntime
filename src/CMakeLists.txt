@@ -94,3 +94,25 @@ include( ${PROJECT_SOURCE_DIR}/cmake/Builtin.cmake )
 install( TARGETS xgameruntime
         RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} )
+
+# Python is architecture-independent; install the helper with each Wine module.
+configure_file(System/nexus-text-entry.py ${CMAKE_BINARY_DIR}/bin/nexus-text-entry.py COPYONLY)
+install(FILES System/nexus-text-entry.py DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+# A dedicated PE process owns the private stdin token and host-only environment.
+add_executable(nexus-text-entry-host System/TextEntryHost.cpp)
+target_compile_features(nexus-text-entry-host PRIVATE cxx_std_17)
+target_link_options(nexus-text-entry-host PRIVATE -static -static-libgcc -static-libstdc++)
+set_target_properties(nexus-text-entry-host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+install(TARGETS nexus-text-entry-host RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+option(NEXUS_NATIVE_TEXT_ENTRY_PROBE "Build the isolated text-entry ABI/transport probe" OFF)
+if(NEXUS_NATIVE_TEXT_ENTRY_PROBE)
+    add_executable(nexus_text-entry-probe ../tests/TextEntry/native-probe.cpp)
+    add_dependencies(nexus_text-entry-probe xgameruntime-idl)
+    target_include_directories(nexus_text-entry-probe PRIVATE "${IDL_BINARY_DIR}" "${PROJECT_SOURCE_DIR}/include")
+    target_compile_features(nexus_text-entry-probe PRIVATE cxx_std_17)
+    target_link_libraries(nexus_text-entry-probe PRIVATE ole32 uuid)
+    target_link_options(nexus_text-entry-probe PRIVATE -static -static-libgcc -static-libstdc++)
+    set_target_properties(nexus_text-entry-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
