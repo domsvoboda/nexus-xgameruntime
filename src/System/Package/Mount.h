@@ -742,3 +742,114 @@ static HRESULT package_mount_legacy( const char *identifier, XPackageMountHandle
         return hr;
     return package_mount_create( package, right, out );
 }
+
+/* XPackageMountWithUiAsync is the GDK's current mount entry point; titles
+ * such as STALKER 2 call it instead of XPackageMountLegacy and treat failure
+ * as a DLC mounting error. Content here is installed before launch, so there
+ * is no UI to show: run the same mount on a worker thread, because copying a
+ * large add-on can take a long time. */
+struct package_mount_async
+{
+    LONG refs, started, canceled;
+    char identifier[33];
+    IXThreadingImpl *threading;
+    XAsyncBlock *async;
+    XPackageMountHandle mount;
+};
+static const char package_mount_ui_identity{};
+
+static void package_mount_async_release( package_mount_async *context )
+{
+    if ( InterlockedDecrement( &context->refs ) ) return;
+    if ( context->mount ) package_mount_close( context->mount );
+    context->threading->Release();
+    free( context );
+}
+
+static DWORD WINAPI package_mount_async_worker( void *arg )
+{
+    auto context = static_cast<package_mount_async *>( arg );
+    HRESULT hr = E_ABORT;
+    if ( !InterlockedCompareExchange( &context->canceled, 0, 0 ) )
+        hr = package_mount_legacy( context->identifier, &context->mount );
+    if ( InterlockedCompareExchange( &context->canceled, 0, 0 ) ) hr = E_ABORT;
+    if ( FAILED( hr ) && context->mount )
+    {
+        package_mount_close( context->mount );
+        context->mount = NULL;
+    }
+    context->threading->XAsyncComplete( context->async, hr, SUCCEEDED( hr ) ? sizeof( XPackageMountHandle ) : 0 );
+    package_mount_async_release( context );
+    return 0;
+}
+
+static HRESULT WINAPI package_mount_async_provider( XAsyncOp op, const XAsyncProviderData *data )
+{
+    auto context = static_cast<package_mount_async *>( data->context );
+    HANDLE worker;
+    HRESULT hr;
+    switch ( op )
+    {
+    case XAsyncOp::Begin:
+        return context->threading->XAsyncSchedule( data->async, 0 );
+    case XAsyncOp::DoWork:
+        if ( InterlockedCompareExchange( &context->started, 1, 0 ) ) return E_PENDING;
+        if ( InterlockedCompareExchange( &context->canceled, 0, 0 ) ) return E_ABORT;
+        context->async = data->async;
+        InterlockedIncrement( &context->refs );
+        if ( !( worker = CreateThread( NULL, 0, package_mount_async_worker, context, 0, NULL ) ) )
+        {
+            hr = HRESULT_FROM_WIN32( GetLastError() );
+            package_mount_async_release( context );
+            return hr;
+        }
+        CloseHandle( worker );
+        return E_PENDING;
+    case XAsyncOp::GetResult:
+        if ( !data->buffer || data->bufferSize < sizeof( XPackageMountHandle ) || !context->mount )
+            return E_INVALIDARG;
+        memcpy( data->buffer, &context->mount, sizeof( XPackageMountHandle ) );
+        context->mount = NULL;
+        break;
+    case XAsyncOp::Cancel:
+        InterlockedExchange( &context->canceled, TRUE );
+        break;
+    case XAsyncOp::Cleanup:
+        package_mount_async_release( context );
+        break;
+    default:
+        break;
+    }
+    return S_OK;
+}
+
+static HRESULT package_mount_ui_begin( const char *identifier, XAsyncBlock *async )
+{
+    if ( !async || !chunks_identifier( identifier ) ) return E_INVALIDARG;
+    auto context = static_cast<package_mount_async *>( calloc( 1, sizeof( package_mount_async ) ) );
+    if ( !context ) return E_OUTOFMEMORY;
+    context->refs = 1;
+    memcpy( context->identifier, identifier, sizeof( context->identifier ) );
+    HRESULT hr = QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&context->threading );
+    if ( FAILED( hr ) )
+    {
+        free( context );
+        return hr;
+    }
+    hr = context->threading->XAsyncBegin( async, context, &package_mount_ui_identity, "XPackageMountWithUiAsync",
+                                          package_mount_async_provider );
+    if ( FAILED( hr ) ) package_mount_async_release( context );
+    return hr;
+}
+
+static HRESULT package_mount_ui_result( XAsyncBlock *async, XPackageMountHandle *mount )
+{
+    if ( !async || !mount ) return E_INVALIDARG;
+    *mount = NULL;
+    IXThreadingImpl *threading;
+    HRESULT hr = QueryApiImpl( CLSID_XThreadingImpl, IID_IXThreadingImpl, ( void ** )&threading );
+    if ( FAILED( hr ) ) return hr;
+    hr = threading->XAsyncGetResult( async, &package_mount_ui_identity, sizeof( XPackageMountHandle ), mount, NULL );
+    threading->Release();
+    return hr;
+}

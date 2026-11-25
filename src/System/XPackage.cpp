@@ -588,7 +588,7 @@ HRESULT WINAPI XPackageImpl::XPackageMountWithUiAsync( const char *packageIdenti
 {
 
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_ASYNC_ENTRY, S_OK, 0 );
-    HRESULT hr = E_NOTIMPL;
+    HRESULT hr = package_mount_ui_begin( packageIdentifier, async );
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_ASYNC_RETURN, hr, 0 );
     return hr;
 }
@@ -597,7 +597,7 @@ HRESULT WINAPI XPackageImpl::XPackageMountWithUiResult( XAsyncBlock *async, XPac
 {
 
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_RESULT_ENTRY, S_OK, 0 );
-    HRESULT hr = E_NOTIMPL;
+    HRESULT hr = package_mount_ui_result( async, mount );
     nexus_dlc_diagnostic( NEXUS_DLC_STAGE_MOUNT_UI_RESULT_RETURN, hr, 0 );
     return hr;
 }
